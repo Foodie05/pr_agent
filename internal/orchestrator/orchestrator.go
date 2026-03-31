@@ -1081,7 +1081,6 @@ func isApprovalRequiredError(err error) bool {
 		strings.Contains(message, "at least 1 approving review is required") ||
 		strings.Contains(message, "repository rule violations found")
 }
-
 func (s *Service) cacheConflictRetry(repoFullName string, prNumber int, pull github.Pull, reviewResult review.Result, allowAutoResolve bool, retryable conflict.RetryableError) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	return s.Storage.SaveConflictRetry(storage.ConflictRetry{

@@ -343,6 +343,18 @@ func TestMergeWithRepositoryRulesRetriesAfterApprove(t *testing.T) {
 	}
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func githubClientWithHTTPClient(baseURL, token, marker string, transport http.RoundTripper) *github.Client {
+	client := github.New(baseURL, token, marker)
+	client.HTTPClient = &http.Client{Transport: transport}
+	return client
+}
+
 type fakeConflictResolver struct {
 	outcome conflict.Outcome
 	err     error
@@ -485,9 +497,7 @@ func TestRecheckConflictUsesCachedEntry(t *testing.T) {
 	if _, found, err := store.FindConflictRetry("acme/api", 11); err != nil || found {
 		t.Fatalf("expected retry cache to be cleared, found=%v err=%v", found, err)
 	}
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
+}type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
