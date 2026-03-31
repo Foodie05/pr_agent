@@ -57,6 +57,8 @@ type ConflictRetry struct {
 	HeadSHA          string `json:"headSha"`
 	TrustLevel       string `json:"trustLevel"`
 	AllowAutoResolve bool   `json:"allowAutoResolve"`
+	ForceResolve     bool   `json:"forceResolve"`
+	OperatorGoal     string `json:"operatorGoal,omitempty"`
 	Pull             any    `json:"pull"`
 	ReviewResult     any    `json:"reviewResult"`
 	FailedStep       string `json:"failedStep"`

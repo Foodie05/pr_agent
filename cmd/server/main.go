@@ -48,8 +48,8 @@ func main() {
 case "recheck":
 		if err := runRecheckConflict(cfg, store, os.Args[1:], hasJSONFlag(os.Args[1:])); err != nil {
 			log.Fatal(err)
-		}	case "add":
-		if err := runRegisterWebhook(cfg, os.Args[1:], hasJSONFlag(os.Args[1:])); err != nil {
+		}
+	case "add":		if err := runRegisterWebhook(cfg, os.Args[1:], hasJSONFlag(os.Args[1:])); err != nil {
 			log.Fatal(err)
 		}
 	default:
@@ -63,8 +63,8 @@ func resolveCommand(args []string) string {
 		return "serve"
 	}
 	switch args[0] {
-case "serve", "status", "stats", "doctor", "logs", "review", "check", "recheck", "add":		return args[0]
-	case "review-pr":
+case "serve", "status", "stats", "doctor", "logs", "review", "check", "recheck", "add":
+		return args[0]	case "review-pr":
 		return "review"
 	case "intervene-pr":
 		return "check"

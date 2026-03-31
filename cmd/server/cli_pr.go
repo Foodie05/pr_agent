@@ -37,6 +37,7 @@ func runReviewPR(cfg config.Config, store *storage.FileStorage, args []string, j
 	fmt.Printf("Reviewed %s #%d\n", result.RepoFullName, result.PRNumber)
 	fmt.Printf("Head SHA: %s\n", result.HeadSHA)
 	fmt.Printf("Risk: %s\n", result.OverallRisk)
+	fmt.Printf("Confidence: %s\n", formatConfidence(result.Confidence, result.ConfidenceSet))
 	fmt.Printf("Trust: %s\n", emptyDash(result.TrustLevel))
 	fmt.Printf("Action: %s (%s)\n", emptyDash(result.ActionTaken), emptyDash(result.ActionStatus))
 	if result.ActionDetails != "" {
@@ -77,6 +78,40 @@ func runIntervenePR(cfg config.Config, store *storage.FileStorage, args []string
 	fmt.Printf("Checked %s #%d\n", result.RepoFullName, result.PRNumber)
 	fmt.Printf("Head SHA: %s\n", result.HeadSHA)
 	fmt.Printf("Risk: %s\n", result.OverallRisk)
+	fmt.Printf("Confidence: %s\n", formatConfidence(result.Confidence, result.ConfidenceSet))
+	fmt.Printf("Trust: %s\n", emptyDash(result.TrustLevel))
+	fmt.Printf("Action: %s (%s)\n", emptyDash(result.ActionTaken), emptyDash(result.ActionStatus))
+	if result.ActionDetails != "" {
+		fmt.Printf("Action Details: %s\n", result.ActionDetails)
+	}
+	fmt.Printf("Stage Timings: %s\n", formatStageDurations(result.StageDurationsMS))
+	return nil
+}
+
+func runRecheckConflict(cfg config.Config, store *storage.FileStorage, args []string, jsonOutput bool) error {
+	repoFullName, prNumber, err := parseRepoAndPR(args, "recheck")
+	if err != nil {
+		return err
+	}
+
+	service := newService(cfg, store)
+	progress := func(stage string, details string) {
+		fmt.Fprintf(os.Stderr, "[%s] %s: %s\n", time.Now().Format(time.RFC3339), stage, details)
+	}
+
+	result, err := service.RecheckConflict(repoFullName, prNumber, "manual_recheck_cli", progress)
+	if err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		return printJSON(result)
+	}
+
+	fmt.Printf("Rechecked %s #%d\n", result.RepoFullName, result.PRNumber)
+	fmt.Printf("Head SHA: %s\n", result.HeadSHA)
+	fmt.Printf("Risk: %s\n", result.OverallRisk)
+	fmt.Printf("Confidence: %s\n", formatConfidence(result.Confidence, result.ConfidenceSet))
 	fmt.Printf("Trust: %s\n", emptyDash(result.TrustLevel))
 	fmt.Printf("Action: %s (%s)\n", emptyDash(result.ActionTaken), emptyDash(result.ActionStatus))
 	if result.ActionDetails != "" {

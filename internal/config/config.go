@@ -26,9 +26,11 @@ type GitHubConfig struct {
 }
 
 type LLMConfig struct {
-	APIBaseURL string
-	APIKey     string
-	Model      string
+	APIBaseURL         string
+	APIKey             string
+	Model              string
+	RequestTimeoutSecs int
+	ReviewBatchSize    int
 }
 
 type ServerConfig struct {
@@ -37,9 +39,11 @@ type ServerConfig struct {
 }
 
 type GitConfig struct {
-	TempDir   string
-	UserName  string
-	UserEmail string
+	TempDir           string
+	UserName          string
+	UserEmail         string
+	StepTimeoutSecs   int
+	ConflictBatchSize int
 }
 
 func Load() Config {
@@ -66,6 +70,34 @@ func Load() Config {
 		}
 	}
 
+	llmTimeoutSecs := 90
+	if value := getEnv("LLM_REQUEST_TIMEOUT_SECONDS", "90"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			llmTimeoutSecs = parsed
+		}
+	}
+
+	reviewBatchSize := 6
+	if value := getEnv("REVIEW_BATCH_SIZE", "6"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			reviewBatchSize = parsed
+		}
+	}
+
+	gitStepTimeoutSecs := 75
+	if value := getEnv("GIT_STEP_TIMEOUT_SECONDS", "75"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			gitStepTimeoutSecs = parsed
+		}
+	}
+
+	conflictBatchSize := 3
+	if value := getEnv("CONFLICT_BATCH_SIZE", "3"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			conflictBatchSize = parsed
+		}
+	}
+
 	return Config{
 		Port:    port,
 		DataDir: filepath.Join(".", "data"),
@@ -77,18 +109,22 @@ func Load() Config {
 			ReviewCommentMarker: getEnv("REVIEW_COMMENT_MARKER", "<!-- pr-agent-go-review -->"),
 		},
 		LLM: LLMConfig{
-			APIBaseURL: strings.TrimRight(getEnv("OPENAI_API_BASE_URL", "https://api.openai.com/v1"), "/"),
-			APIKey:     getEnv("OPENAI_API_KEY", ""),
-			Model:      getEnv("OPENAI_MODEL", "gpt-4.1-mini"),
+			APIBaseURL:         strings.TrimRight(getEnv("OPENAI_API_BASE_URL", "https://api.openai.com/v1"), "/"),
+			APIKey:             getEnv("OPENAI_API_KEY", ""),
+			Model:              getEnv("OPENAI_MODEL", "gpt-4.1-mini"),
+			RequestTimeoutSecs: llmTimeoutSecs,
+			ReviewBatchSize:    reviewBatchSize,
 		},
 		Server: ServerConfig{
 			WorkerCount: workerCount,
 			QueueSize:   queueSize,
 		},
 		Git: GitConfig{
-			TempDir:   getEnv("GIT_TEMP_DIR", filepath.Join(os.TempDir(), "pr-agent-go")),
-			UserName:  getEnv("GIT_USER_NAME", "pr-agent-go"),
-			UserEmail: getEnv("GIT_USER_EMAIL", "pr-agent-go@local"),
+			TempDir:           getEnv("GIT_TEMP_DIR", filepath.Join(os.TempDir(), "pr-agent-go")),
+			UserName:          getEnv("GIT_USER_NAME", "pr-agent-go"),
+			UserEmail:         getEnv("GIT_USER_EMAIL", "pr-agent-go@local"),
+			StepTimeoutSecs:   gitStepTimeoutSecs,
+			ConflictBatchSize: conflictBatchSize,
 		},
 	}
 }

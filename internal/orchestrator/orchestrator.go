@@ -59,6 +59,8 @@ type Result struct {
 	PRNumber         int              `json:"prNumber,omitempty"`
 	HeadSHA          string           `json:"headSha,omitempty"`
 	OverallRisk      string           `json:"overallRisk,omitempty"`
+	Confidence       float64          `json:"confidence,omitempty"`
+	ConfidenceSet    bool             `json:"confidenceSet,omitempty"`
 	TrustLevel       string           `json:"trustLevel,omitempty"`
 	ActionTaken      string           `json:"actionTaken,omitempty"`
 	ActionStatus     string           `json:"actionStatus,omitempty"`
@@ -239,10 +241,14 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 	trustLevel := trustNeedsUserIntervention
 	reviewSummary := ""
 	overallRisk := "unknown"
+	confidence := 0.0
+	confidenceSet := false
 	if found {
 		trustLevel = firstNonEmpty(latestRun.TrustLevel, trustNeedsUserIntervention)
 		reviewSummary = latestRun.Summary
 		overallRisk = firstNonEmpty(latestRun.OverallRisk, "unknown")
+		confidence = latestRun.Confidence
+		confidenceSet = latestRun.Confidence > 0
 	}
 
 	done = recorder.Start("intervention", "interpreting user note with agent")
@@ -262,6 +268,20 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 	done(err)
 	if err != nil {
 		return Result{StageDurationsMS: recorder.Durations(), TotalDurationMS: recorder.TotalMS()}, err
+	}
+
+	if decision.Action == "merge" && isExplicitAcceptanceNote(userNote) {
+		overallRisk = "low"
+		confidence = 0.95
+		confidenceSet = true
+		switch {
+		case pull.Mergeable != nil && *pull.Mergeable:
+			trustLevel = trustTrusted
+		case pull.MergeableState == "behind":
+			trustLevel = trustTrustedNeedsSync
+		default:
+			trustLevel = trustTrustedConflict
+		}
 	}
 
 	action := autoAction{
@@ -304,9 +324,10 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 			}
 		} else {
 			outcome, resolveErr := s.resolveConflictsForPull(repoFullName, prNumber, pull, review.Result{
-				Summary:     reviewSummary,
-				OverallRisk: overallRisk,
-			}, trustLevel == trustTrustedConflict)
+				Summary:      reviewSummary,
+				OverallRisk:  overallRisk,
+				OperatorGoal: buildOperatorGoal(userNote, decision.Summary),
+			}, true, isExplicitAcceptanceNote(userNote))
 			if resolveErr != nil {
 				err = resolveErr
 				break
@@ -328,6 +349,8 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 			PRNumber:         prNumber,
 			HeadSHA:          pull.Head.SHA,
 			OverallRisk:      overallRisk,
+			Confidence:       confidence,
+			ConfidenceSet:    confidenceSet,
 			TrustLevel:       trustLevel,
 			ActionTaken:      action.ActionTaken,
 			ActionStatus:     "failed",
@@ -356,6 +379,8 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 				PRNumber:         prNumber,
 				HeadSHA:          pull.Head.SHA,
 				OverallRisk:      overallRisk,
+				Confidence:       confidence,
+				ConfidenceSet:    confidenceSet,
 				TrustLevel:       trustLevel,
 				ActionTaken:      action.ActionTaken,
 				ActionStatus:     "failed",
@@ -376,7 +401,7 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 		Provider:         "manual_intervention",
 		Summary:          decision.Summary,
 		OverallRisk:      overallRisk,
-		Confidence:       1,
+		Confidence:       confidence,
 		TrustLevel:       trustLevel,
 		MergeReadiness:   "needs_human_review",
 		ActionTaken:      action.ActionTaken,
@@ -405,6 +430,8 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 		PRNumber:         prNumber,
 		HeadSHA:          pull.Head.SHA,
 		OverallRisk:      overallRisk,
+		Confidence:       confidence,
+		ConfidenceSet:    confidenceSet,
 		TrustLevel:       trustLevel,
 		ActionTaken:      action.ActionTaken,
 		ActionStatus:     action.ActionStatus,
@@ -433,15 +460,15 @@ func (s *Service) RecheckConflict(repoFullName string, prNumber int, triggerEven
 	}
 
 	done = recorder.Start("recheck_conflict", fmt.Sprintf("retrying conflict workflow from cached %s step", entry.FailedStep))
-	outcome, err := s.resolveConflictsForPull(repoFullName, prNumber, pull, reviewResult, entry.AllowAutoResolve)
-	done(err)
+outcome, err := s.resolveConflictsForPull(repoFullName, prNumber, pull, reviewResult, entry.AllowAutoResolve)	done(err)
 	if err != nil {
 		return Result{
 			RepoFullName:     repoFullName,
 			PRNumber:         prNumber,
 			HeadSHA:          pull.Head.SHA,
 			OverallRisk:      reviewResult.OverallRisk,
-			TrustLevel:       entry.TrustLevel,
+Confidence:       reviewResult.Confidence,
+			ConfidenceSet:    reviewResult.ConfidenceSet,			TrustLevel:       entry.TrustLevel,
 			ActionTaken:      "recheck_conflict",
 			ActionStatus:     "failed",
 			ActionDetails:    err.Error(),
@@ -457,7 +484,8 @@ func (s *Service) RecheckConflict(repoFullName string, prNumber int, triggerEven
 			PRNumber:         prNumber,
 			HeadSHA:          pull.Head.SHA,
 			OverallRisk:      reviewResult.OverallRisk,
-			TrustLevel:       entry.TrustLevel,
+Confidence:       reviewResult.Confidence,
+			ConfidenceSet:    reviewResult.ConfidenceSet,			TrustLevel:       entry.TrustLevel,
 			ActionTaken:      action.ActionTaken,
 			ActionStatus:     "failed",
 			ActionDetails:    err.Error(),
@@ -486,7 +514,8 @@ func (s *Service) RecheckConflict(repoFullName string, prNumber int, triggerEven
 		PRNumber:         prNumber,
 		HeadSHA:          pull.Head.SHA,
 		OverallRisk:      reviewResult.OverallRisk,
-		TrustLevel:       entry.TrustLevel,
+Confidence:       reviewResult.Confidence,
+		ConfidenceSet:    reviewResult.ConfidenceSet,		TrustLevel:       entry.TrustLevel,
 		ActionTaken:      action.ActionTaken,
 		ActionStatus:     action.ActionStatus,
 		ActionDetails:    action.ActionDetails,
@@ -572,6 +601,8 @@ func (s *Service) reviewPullWithRecorder(repoFullName string, prNumber int, head
 			PRNumber:         prNumber,
 			HeadSHA:          headSHA,
 			OverallRisk:      reviewResult.OverallRisk,
+			Confidence:       reviewResult.Confidence,
+			ConfidenceSet:    reviewResult.ConfidenceSet,
 			TrustLevel:       action.TrustLevel,
 			ActionTaken:      action.ActionTaken,
 			ActionStatus:     "failed",
@@ -594,6 +625,8 @@ func (s *Service) reviewPullWithRecorder(repoFullName string, prNumber int, head
 				PRNumber:         prNumber,
 				HeadSHA:          headSHA,
 				OverallRisk:      reviewResult.OverallRisk,
+				Confidence:       reviewResult.Confidence,
+				ConfidenceSet:    reviewResult.ConfidenceSet,
 				TrustLevel:       action.TrustLevel,
 				ActionTaken:      action.ActionTaken,
 				ActionStatus:     "failed",
@@ -639,6 +672,8 @@ func (s *Service) reviewPullWithRecorder(repoFullName string, prNumber int, head
 		PRNumber:         prNumber,
 		HeadSHA:          headSHA,
 		OverallRisk:      reviewResult.OverallRisk,
+		Confidence:       reviewResult.Confidence,
+		ConfidenceSet:    reviewResult.ConfidenceSet,
 		TrustLevel:       action.TrustLevel,
 		ActionTaken:      action.ActionTaken,
 		ActionStatus:     action.ActionStatus,
@@ -716,7 +751,7 @@ func (s *Service) handlePostReviewAction(repoFullName string, prNumber int, pull
 			ActionDetails: "trusted PR was behind base branch; requested GitHub update-branch",
 		}, nil
 	case trustTrustedConflict:
-		outcome, err := s.resolveConflictsForPull(repoFullName, prNumber, pull, reviewResult, true)
+		outcome, err := s.resolveConflictsForPull(repoFullName, prNumber, pull, reviewResult, true, false)
 		if err != nil {
 			return autoAction{
 				TrustLevel:    trustLevel,
@@ -756,7 +791,7 @@ func (s *Service) handlePostReviewAction(repoFullName string, prNumber int, pull
 		}, nil
 	}
 
-	outcome, err := s.resolveConflictsForPull(repoFullName, prNumber, pull, reviewResult, true)
+	outcome, err := s.resolveConflictsForPull(repoFullName, prNumber, pull, reviewResult, true, false)
 	if err != nil {
 		return autoAction{
 			TrustLevel:    trustTrustedConflict,
@@ -834,11 +869,65 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func isExplicitAcceptanceNote(note string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(note))
+	if normalized == "" {
+		return false
+	}
+
+	negativeMarkers := []string{
+		"do not merge",
+		"don't merge",
+		"not ready to merge",
+		"暂不合并",
+		"不要合并",
+		"先不要合并",
+		"不接受",
+		"reject",
+	}
+	for _, marker := range negativeMarkers {
+		if strings.Contains(normalized, marker) {
+			return false
+		}
+	}
+
+	positiveMarkers := []string{
+		"accept directly",
+		"accept this pr",
+		"accept the pr",
+		"approved for merge",
+		"force merge",
+		"merge directly",
+		"merge it directly",
+		"merge now",
+		"just merge it",
+		"直接合并",
+		"强行合并",
+		"强制合并",
+		"接受这个pr",
+		"接受该pr",
+		"接受这个pull request",
+		"接受这个合并请求",
+		"直接接受",
+		"handle all conflicts automatically",
+		"完全自行处理",
+	}
+	for _, marker := range positiveMarkers {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func reviewResultFromRun(run storage.ReviewRun) review.Result {
 	result := review.Result{
 		Summary:         run.Summary,
 		OverallRisk:     run.OverallRisk,
 		Confidence:      run.Confidence,
+		ConfidenceSet:   run.Confidence > 0,
+		OperatorGoal:    "",
 		MergeReadiness:  run.MergeReadiness,
 		Provider:        run.Provider,
 		Findings:        []review.Finding{},
@@ -881,7 +970,24 @@ func reviewResultFromRun(run storage.ReviewRun) review.Result {
 			}
 		}
 	}
+	if operatorGoal := stringFromAny(payload["operator_goal"]); operatorGoal != "" {
+		result.OperatorGoal = operatorGoal
+	}
+	if operatorGoal := stringFromAny(payload["userNote"]); operatorGoal != "" && result.OperatorGoal == "" {
+		result.OperatorGoal = operatorGoal
+	}
 	return result
+}
+
+func buildOperatorGoal(userNote, decisionSummary string) string {
+	parts := make([]string, 0, 2)
+	if value := strings.TrimSpace(userNote); value != "" {
+		parts = append(parts, "User instruction: "+value)
+	}
+	if value := strings.TrimSpace(decisionSummary); value != "" {
+		parts = append(parts, "Planned action: "+value)
+	}
+	return strings.Join(parts, " | ")
 }
 
 func stringFromAny(value any) string {
@@ -925,7 +1031,7 @@ func buildReviewContext(pull github.Pull, files []github.PullFile, status github
 	}
 }
 
-func (s *Service) resolveConflictsForPull(repoFullName string, prNumber int, pull github.Pull, reviewResult review.Result, allowAutoResolve bool) (conflict.Outcome, error) {
+func (s *Service) resolveConflictsForPull(repoFullName string, prNumber int, pull github.Pull, reviewResult review.Result, allowAutoResolve bool, forceResolve bool) (conflict.Outcome, error) {
 	if s.ConflictResolver == nil {
 		body := "## PR Agent Action Required\n\n检测到合并冲突，但当前服务未配置冲突处理器。请手动处理冲突后重试。"
 		if _, err := s.GitHub.CreateIssueComment(repoFullName, prNumber, body); err != nil {
@@ -944,15 +1050,16 @@ func (s *Service) resolveConflictsForPull(repoFullName string, prNumber int, pul
 	}
 
 	mode := conflict.ModeSuggestOnly
-	if allowAutoResolve {
+	if forceResolve {
+		mode = conflict.ModeForceResolve
+	} else if allowAutoResolve {
 		mode = conflict.ModeAutoResolve
 	}
 	outcome, err := s.ConflictResolver.Resolve(pull, reviewResult, mode)
 	if err != nil {
 		var retryable conflict.RetryableError
 		if errors.As(err, &retryable) {
-			_ = s.cacheConflictRetry(repoFullName, prNumber, pull, reviewResult, allowAutoResolve, retryable)
-			body := fmt.Sprintf("## PR Agent Action Required\n\n冲突处理在 `%s` 步骤因网络或超时失败，已缓存当前状态。请稍后使用 `recheck owner/repo pr_number` 从冲突处理步骤继续。\n\n错误信息：`%s`", retryable.Step, retryable.Message)
+_ = s.cacheConflictRetry(repoFullName, prNumber, pull, reviewResult, allowAutoResolve, retryable)			body := fmt.Sprintf("## PR Agent Action Required\n\n冲突处理在 `%s` 步骤因网络或超时失败，已缓存当前状态。请稍后使用 `recheck owner/repo pr_number` 从冲突处理步骤继续。\n\n错误信息：`%s`", retryable.Step, retryable.Message)
 			_, _ = s.GitHub.CreateIssueComment(repoFullName, prNumber, body)
 		}
 		return conflict.Outcome{}, err
@@ -1081,15 +1188,15 @@ func isApprovalRequiredError(err error) bool {
 		strings.Contains(message, "at least 1 approving review is required") ||
 		strings.Contains(message, "repository rule violations found")
 }
-func (s *Service) cacheConflictRetry(repoFullName string, prNumber int, pull github.Pull, reviewResult review.Result, allowAutoResolve bool, retryable conflict.RetryableError) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+func (s *Service) cacheConflictRetry(repoFullName string, prNumber int, pull github.Pull, reviewResult review.Result, allowAutoResolve bool, forceResolve bool, retryable conflict.RetryableError) error {	now := time.Now().UTC().Format(time.RFC3339)
 	return s.Storage.SaveConflictRetry(storage.ConflictRetry{
 		RepoFullName:     repoFullName,
 		PRNumber:         prNumber,
 		HeadSHA:          pull.Head.SHA,
 		TrustLevel:       decideTrustLevel(pull, github.CommitStatus{}, reviewResult),
 		AllowAutoResolve: allowAutoResolve,
-		Pull:             pull,
+ForceResolve:     forceResolve,
+		OperatorGoal:     reviewResult.OperatorGoal,		Pull:             pull,
 		ReviewResult:     reviewResult,
 		FailedStep:       retryable.Step,
 		ErrorMessage:     retryable.Message,
@@ -1114,6 +1221,9 @@ func decodeConflictRetry(entry storage.ConflictRetry) (github.Pull, review.Resul
 	}
 	if err := json.Unmarshal(resultBytes, &result); err != nil {
 		return github.Pull{}, review.Result{}, err
+	}
+if result.OperatorGoal == "" {
+		result.OperatorGoal = entry.OperatorGoal
 	}
 	return pull, result, nil
 }
