@@ -79,6 +79,13 @@ func emptyDash(value string) string {
 	return value
 }
 
+func formatConfidence(value float64, set bool) string {
+	if !set {
+		return "unavailable"
+	}
+	return fmt.Sprintf("%.2f", value)
+}
+
 func formatStageDurations(values map[string]int64) string {
 	if len(values) == 0 {
 		return "-"

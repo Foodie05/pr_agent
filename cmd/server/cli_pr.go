@@ -37,6 +37,7 @@ func runReviewPR(cfg config.Config, store *storage.FileStorage, args []string, j
 	fmt.Printf("Reviewed %s #%d\n", result.RepoFullName, result.PRNumber)
 	fmt.Printf("Head SHA: %s\n", result.HeadSHA)
 	fmt.Printf("Risk: %s\n", result.OverallRisk)
+	fmt.Printf("Confidence: %s\n", formatConfidence(result.Confidence, result.ConfidenceSet))
 	fmt.Printf("Trust: %s\n", emptyDash(result.TrustLevel))
 	fmt.Printf("Action: %s (%s)\n", emptyDash(result.ActionTaken), emptyDash(result.ActionStatus))
 	if result.ActionDetails != "" {
@@ -77,6 +78,7 @@ func runIntervenePR(cfg config.Config, store *storage.FileStorage, args []string
 	fmt.Printf("Checked %s #%d\n", result.RepoFullName, result.PRNumber)
 	fmt.Printf("Head SHA: %s\n", result.HeadSHA)
 	fmt.Printf("Risk: %s\n", result.OverallRisk)
+	fmt.Printf("Confidence: %s\n", formatConfidence(result.Confidence, result.ConfidenceSet))
 	fmt.Printf("Trust: %s\n", emptyDash(result.TrustLevel))
 	fmt.Printf("Action: %s (%s)\n", emptyDash(result.ActionTaken), emptyDash(result.ActionStatus))
 	if result.ActionDetails != "" {
@@ -109,6 +111,7 @@ func runRecheckConflict(cfg config.Config, store *storage.FileStorage, args []st
 	fmt.Printf("Rechecked %s #%d\n", result.RepoFullName, result.PRNumber)
 	fmt.Printf("Head SHA: %s\n", result.HeadSHA)
 	fmt.Printf("Risk: %s\n", result.OverallRisk)
+	fmt.Printf("Confidence: %s\n", formatConfidence(result.Confidence, result.ConfidenceSet))
 	fmt.Printf("Trust: %s\n", emptyDash(result.TrustLevel))
 	fmt.Printf("Action: %s (%s)\n", emptyDash(result.ActionTaken), emptyDash(result.ActionStatus))
 	if result.ActionDetails != "" {

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"pr-agent-go/internal/config"
 	"pr-agent-go/internal/conflict"
 	"pr-agent-go/internal/github"
 	"pr-agent-go/internal/orchestrator"
@@ -16,7 +17,6 @@ import (
 	"pr-agent-go/internal/review"
 	"pr-agent-go/internal/status"
 	"pr-agent-go/internal/storage"
-	"pr-agent-go/internal/config"
 )
 
 func runServer(cfg config.Config, store *storage.FileStorage) error {
@@ -114,11 +114,25 @@ func runServer(cfg config.Config, store *storage.FileStorage) error {
 }
 
 func newService(cfg config.Config, store *storage.FileStorage) *orchestrator.Service {
+	githubClient := github.New(cfg.GitHub.APIBaseURL, cfg.GitHub.Token, cfg.GitHub.ReviewCommentMarker)
+	githubClient.HTTPClient = &http.Client{Timeout: 20 * time.Second}
+
+	agent := review.NewAgent(cfg.LLM.APIBaseURL, cfg.LLM.APIKey, cfg.LLM.Model)
+	agent.ReviewBatchSize = cfg.LLM.ReviewBatchSize
+	agent.HTTPClient = &http.Client{Timeout: time.Duration(cfg.LLM.RequestTimeoutSecs) * time.Second}
+
+	conflictAgent := review.NewAgent(cfg.LLM.APIBaseURL, cfg.LLM.APIKey, cfg.LLM.Model)
+	conflictAgent.HTTPClient = &http.Client{Timeout: time.Duration(cfg.LLM.RequestTimeoutSecs) * time.Second}
+
+	conflictResolver := conflict.NewGitResolver(cfg.GitHub.Token, cfg.Git.TempDir, cfg.Git.UserName, cfg.Git.UserEmail, conflictAgent)
+	conflictResolver.StepTimeout = time.Duration(cfg.Git.StepTimeoutSecs) * time.Second
+	conflictResolver.ConflictBatchSize = cfg.Git.ConflictBatchSize
+
 	return &orchestrator.Service{
 		Storage:             store,
-		GitHub:              github.New(cfg.GitHub.APIBaseURL, cfg.GitHub.Token, cfg.GitHub.ReviewCommentMarker),
-		Agent:               review.NewAgent(cfg.LLM.APIBaseURL, cfg.LLM.APIKey, cfg.LLM.Model),
-		ConflictResolver:    conflict.NewGitResolver(cfg.GitHub.Token, cfg.Git.TempDir, cfg.Git.UserName, cfg.Git.UserEmail, review.NewAgent(cfg.LLM.APIBaseURL, cfg.LLM.APIKey, cfg.LLM.Model)),
+		GitHub:              githubClient,
+		Agent:               agent,
+		ConflictResolver:    conflictResolver,
 		ReviewCommentMarker: cfg.GitHub.ReviewCommentMarker,
 	}
 }
