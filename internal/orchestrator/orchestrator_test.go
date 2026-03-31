@@ -356,13 +356,16 @@ func githubClientWithHTTPClient(baseURL, token, marker string, transport http.Ro
 }
 
 type fakeConflictResolver struct {
-outcome  conflict.Outcome
+	outcome  conflict.Outcome
 	err      error
 	lastMode string
+	lastCached []conflict.ResolvedFile
 }
 
-func (f *fakeConflictResolver) Resolve(pull github.Pull, reviewResult review.Result, mode string) (conflict.Outcome, error) {
-	f.lastMode = mode	return f.outcome, f.err
+func (f *fakeConflictResolver) Resolve(pull github.Pull, reviewResult review.Result, mode string, cached []conflict.ResolvedFile) (conflict.Outcome, error) {
+	f.lastMode = mode
+	f.lastCached = cached
+	return f.outcome, f.err
 }
 
 func TestResolveConflictsCachesRetryableFailure(t *testing.T) {
@@ -375,7 +378,10 @@ func TestResolveConflictsCachesRetryableFailure(t *testing.T) {
 	httpClient := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/issues/10/comments" {
 			body, _ := io.ReadAll(r.Body)
-var payload struct{ Body string `json:"body"` }			_ = json.Unmarshal(body, &payload)
+			var payload struct {
+				Body string `json:"body"`
+			}
+			_ = json.Unmarshal(body, &payload)
 			commentBodies = append(commentBodies, payload.Body)
 			return jsonResponse(t, map[string]any{"id": 10, "body": payload.Body})
 		}
@@ -386,7 +392,8 @@ var payload struct{ Body string `json:"body"` }			_ = json.Unmarshal(body, &payl
 	service := &Service{
 		Storage:             store,
 		GitHub:              githubClientWithHTTPClient("https://api.github.test", "test-token", "<!-- marker -->", httpClient),
-ConflictResolver:    fakeConflictResolver{err: conflict.RetryableError{Step: "clone", Message: "timeout"}},		ReviewCommentMarker: "<!-- marker -->",
+		ConflictResolver:    &fakeConflictResolver{err: conflict.RetryableError{Step: "clone", Message: "timeout"}},
+		ReviewCommentMarker: "<!-- marker -->",
 	}
 
 	pull := github.Pull{}
@@ -396,7 +403,8 @@ ConflictResolver:    fakeConflictResolver{err: conflict.RetryableError{Step: "cl
 	pull.Base.Repo.FullName = "acme/api"
 	result := review.Result{OverallRisk: "low", Confidence: 0.9, ConfidenceSet: true, MergeReadiness: "ready_for_manual_approval"}
 
-_, err = service.resolveConflictsForPull("acme/api", 10, pull, result, true)	if err == nil {
+	_, err = service.resolveConflictsForPull("acme/api", 10, pull, result, true, false, nil)
+	if err == nil {
 		t.Fatalf("expected retryable error")
 	}
 
@@ -433,6 +441,9 @@ func TestRecheckConflictUsesCachedEntry(t *testing.T) {
 		ForceResolve:     true,
 		Pull:             pull,
 		ReviewResult:     result,
+		ResolvedFiles: []conflict.ResolvedFile{
+			{Path: "cached.go", Content: "package cached\n", Summary: "cached", Confidence: 0.95},
+		},
 		FailedStep:       "clone",
 		ErrorMessage:     "timeout",
 		CreatedAt:        "2026-03-31T00:00:00Z",
@@ -446,10 +457,11 @@ func TestRecheckConflictUsesCachedEntry(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/api/pulls/11":
 			return jsonResponse(t, map[string]any{
-"number":         11,
-				"title":          "conflict",
-				"draft":          false,
-				"mergeable":      true,				"mergeable_state": "clean",
+				"number":          11,
+				"title":           "conflict",
+				"draft":           false,
+				"mergeable":       true,
+				"mergeable_state": "clean",
 				"base": map[string]any{
 					"ref": "main",
 					"repo": map[string]any{
@@ -465,7 +477,10 @@ func TestRecheckConflictUsesCachedEntry(t *testing.T) {
 			return jsonResponse(t, map[string]any{"merged": true})
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/issues/11/comments":
 			body, _ := io.ReadAll(r.Body)
-var payload struct{ Body string `json:"body"` }			_ = json.Unmarshal(body, &payload)
+			var payload struct {
+				Body string `json:"body"`
+			}
+			_ = json.Unmarshal(body, &payload)
 			commentBodies = append(commentBodies, payload.Body)
 			return jsonResponse(t, map[string]any{"id": 11, "body": payload.Body})
 		default:
@@ -477,7 +492,8 @@ var payload struct{ Body string `json:"body"` }			_ = json.Unmarshal(body, &payl
 	service := &Service{
 		Storage:             store,
 		GitHub:              githubClientWithHTTPClient("https://api.github.test", "test-token", "<!-- marker -->", httpClient),
-ConflictResolver:    &fakeConflictResolver{outcome: conflict.Outcome{Mode: conflict.ModeAutoResolve, MergeClean: true, AutoResolved: true}},		ReviewCommentMarker: "<!-- marker -->",
+		ConflictResolver:    &fakeConflictResolver{outcome: conflict.Outcome{Mode: conflict.ModeAutoResolve, MergeClean: true, AutoResolved: true}},
+		ReviewCommentMarker: "<!-- marker -->",
 	}
 
 	got, err := service.RecheckConflict("acme/api", 11, "manual_recheck_cli", nil)
@@ -486,6 +502,10 @@ ConflictResolver:    &fakeConflictResolver{outcome: conflict.Outcome{Mode: confl
 	}
 	if got.ActionStatus != "merged" {
 		t.Fatalf("expected merged status, got %s", got.ActionStatus)
+	}
+	resolver := service.ConflictResolver.(*fakeConflictResolver)
+	if len(resolver.lastCached) != 1 || resolver.lastCached[0].Path != "cached.go" {
+		t.Fatalf("expected cached resolved file to be replayed, got %+v", resolver.lastCached)
 	}
 	if len(commentBodies) != 1 || !strings.Contains(commentBodies[0], "Accepted. Thank you for your contribution!") {
 		t.Fatalf("expected final accepted comment, got %v", commentBodies)
@@ -656,18 +676,6 @@ func TestInterveneExplicitAcceptanceOverridesRiskAndConfidence(t *testing.T) {
 		t.Fatalf("expected merged action, got %s", result.ActionStatus)
 	}
 }
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-func githubClientWithHTTPClient(baseURL, token, marker string, transport http.RoundTripper) *github.Client {
-	client := github.New(baseURL, token, marker)
-	client.HTTPClient = &http.Client{Transport: transport}
-	return client
-}}
 
 func jsonResponse(t *testing.T, value any) (*http.Response, error) {
 	t.Helper()
