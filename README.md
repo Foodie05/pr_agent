@@ -221,11 +221,23 @@ go build ./...
 This repository includes example scripts for packaging and deployment:
 
 - [build_linux_x64.sh](scripts/build_linux_x64.sh)
-- [deploy_cruty_cn.sh](scripts/deploy_cruty_cn.sh)
+- [deploy_remote.sh](scripts/deploy_remote.sh)
 
 The deployment script in this repository is environment-specific. Treat it as an example and adapt it to your own infrastructure.
 
+Example:
+
+```bash
+REMOTE_HOST=your-server.example ./scripts/deploy_remote.sh
+```
+
 仓库中的部署脚本是带环境假设的示例，请根据你自己的基础设施进行调整。
+
+示例：
+
+```bash
+REMOTE_HOST=your-server.example ./scripts/deploy_remote.sh
+```
 
 ## Security and Privacy | 安全与隐私
 
