@@ -49,6 +49,7 @@ type Result struct {
 	Summary         string    `json:"summary"`
 	OverallRisk     string    `json:"overall_risk"`
 	Confidence      float64   `json:"confidence"`
+	ConfidenceSet   bool      `json:"-"`
 	Findings        []Finding `json:"findings"`
 	Strengths       []string  `json:"strengths"`
 	TestSuggestions []string  `json:"test_suggestions"`
@@ -233,11 +234,21 @@ Base your output only on the provided pull request context.
 Return valid JSON with keys:
 summary, overall_risk, confidence, findings, strengths, test_suggestions, merge_readiness.
 overall_risk must be one of: low, medium, high.
-merge_readiness must be one of: needs_human_review, ready_for_manual_approval.`
+merge_readiness must be one of: needs_human_review, ready_for_manual_approval.
+confidence must be a number between 0 and 1.
+Do not omit any required field.`
 
 	requestBody := map[string]any{
 		"model":       a.Model,
 		"temperature": 0.2,
+		"response_format": map[string]any{
+			"type": "json_schema",
+			"json_schema": map[string]any{
+				"name":   "pr_review_result",
+				"strict": true,
+				"schema": reviewResultSchema(),
+			},
+		},
 		"messages": []map[string]string{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": mustJSON(context)},
@@ -273,7 +284,7 @@ merge_readiness must be one of: needs_human_review, ready_for_manual_approval.`
 	var parsed struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content any `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -284,7 +295,11 @@ merge_readiness must be one of: needs_human_review, ready_for_manual_approval.`
 		return Result{}, fmt.Errorf("llm response missing choices")
 	}
 
-	raw := parsed.Choices[0].Message.Content
+	raw, err := messageContentText(parsed.Choices[0].Message.Content)
+	if err != nil {
+		return Result{}, err
+	}
+
 	jsonPayload, err := extractJSONObject(raw)
 	if err != nil {
 		return Result{}, err
@@ -576,10 +591,11 @@ func heuristicReview(context Context) Result {
 	}
 
 	return normalizeResult(Result{
-		Summary:     fmt.Sprintf("本 PR 主要涉及 %s 的修改，当前由本地启发式规则生成摘要，仍建议人工复核关键逻辑。", summaryTarget),
-		OverallRisk: risk,
-		Confidence:  0.42,
-		Findings:    findings,
+		Summary:       fmt.Sprintf("本 PR 主要涉及 %s 的修改，当前由本地启发式规则生成摘要，仍建议人工复核关键逻辑。", summaryTarget),
+		OverallRisk:   risk,
+		Confidence:    0.42,
+		ConfidenceSet: true,
+		Findings:      findings,
 		Strengths: []string{
 			fmt.Sprintf("本次共改动 %d 个文件", len(context.ChangedFiles)),
 			fmt.Sprintf("CI 状态为 %s", fallback(context.CI.State, "unknown")),
@@ -642,11 +658,13 @@ func normalizeResult(result Result) Result {
 		result.OverallRisk = "medium"
 	}
 
-	if result.Confidence < 0 {
-		result.Confidence = 0
-	}
-	if result.Confidence > 1 {
-		result.Confidence = 1
+	if result.ConfidenceSet {
+		if result.Confidence < 0 {
+			result.Confidence = 0
+		}
+		if result.Confidence > 1 {
+			result.Confidence = 1
+		}
 	}
 
 	switch result.MergeReadiness {
@@ -660,10 +678,14 @@ func normalizeResult(result Result) Result {
 	} else {
 		filteredFindings := make([]Finding, 0, len(result.Findings))
 		for _, finding := range result.Findings {
-			if strings.TrimSpace(finding.File) == "" &&
-				strings.TrimSpace(finding.Title) == "" &&
-				strings.TrimSpace(finding.Detail) == "" &&
-				strings.TrimSpace(finding.Suggestion) == "" {
+			file := strings.TrimSpace(finding.File)
+			title := strings.TrimSpace(finding.Title)
+			detail := strings.TrimSpace(finding.Detail)
+			suggestion := strings.TrimSpace(finding.Suggestion)
+			if file == "" && title == "" && detail == "" && suggestion == "" {
+				continue
+			}
+			if title == "" && detail == "" {
 				continue
 			}
 			filteredFindings = append(filteredFindings, finding)
@@ -675,13 +697,6 @@ func normalizeResult(result Result) Result {
 	}
 	if result.TestSuggestions == nil {
 		result.TestSuggestions = []string{}
-	}
-
-	// Some OpenAI-compatible providers omit confidence or return an unusable zero.
-	// For clearly low-risk, clean PRs we promote that missing value to a conservative default
-	// so downstream trust logic can still auto-handle obvious cases like docs-only changes.
-	if result.Confidence == 0 && result.OverallRisk == "low" && len(result.Findings) == 0 && result.MergeReadiness == "ready_for_manual_approval" {
-		result.Confidence = 0.82
 	}
 
 	return result
@@ -731,10 +746,12 @@ func normalizeConflictSummary(summary ConflictSummary) ConflictSummary {
 }
 
 func resultFromMap(payload map[string]any) Result {
+	confidence, confidenceSet := optionalFloatValue(payload, "confidence")
 	result := Result{
 		Summary:         stringValue(payload["summary"]),
 		OverallRisk:     stringValue(payload["overall_risk"]),
-		Confidence:      floatValue(payload["confidence"]),
+		Confidence:      confidence,
+		ConfidenceSet:   confidenceSet,
 		Strengths:       stringSliceValue(payload["strengths"]),
 		TestSuggestions: stringSliceValue(payload["test_suggestions"]),
 		MergeReadiness:  stringValue(payload["merge_readiness"]),
@@ -814,6 +831,14 @@ func floatValue(value any) float64 {
 	return 0
 }
 
+func optionalFloatValue(payload map[string]any, key string) (float64, bool) {
+	value, ok := payload[key]
+	if !ok {
+		return 0, false
+	}
+	return floatValue(value), true
+}
+
 func boolValue(value any) bool {
 	switch typed := value.(type) {
 	case bool:
@@ -881,4 +906,88 @@ func extractJSONObject(text string) (string, error) {
 		return "", fmt.Errorf("model output did not contain json")
 	}
 	return text[start : end+1], nil
+}
+
+func messageContentText(content any) (string, error) {
+	switch typed := content.(type) {
+	case string:
+		return typed, nil
+	case []any:
+		var parts []string
+		for _, item := range typed {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if stringValue(entry["type"]) == "text" {
+				text := stringValue(entry["text"])
+				if text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n"), nil
+		}
+	}
+	return "", fmt.Errorf("llm response missing text content")
+}
+
+func reviewResultSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required": []string{
+			"summary",
+			"overall_risk",
+			"confidence",
+			"findings",
+			"strengths",
+			"test_suggestions",
+			"merge_readiness",
+		},
+		"properties": map[string]any{
+			"summary": map[string]any{
+				"type": "string",
+			},
+			"overall_risk": map[string]any{
+				"type": "string",
+				"enum": []string{"low", "medium", "high"},
+			},
+			"confidence": map[string]any{
+				"type":    "number",
+				"minimum": 0,
+				"maximum": 1,
+			},
+			"findings": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"severity", "file", "title", "detail", "suggestion"},
+					"properties": map[string]any{
+						"severity": map[string]any{"type": "string", "minLength": 1},
+						"file":     map[string]any{"type": "string", "minLength": 1},
+						"title":    map[string]any{"type": "string", "minLength": 1},
+						"detail":   map[string]any{"type": "string", "minLength": 1},
+						"suggestion": map[string]any{
+							"type": "string",
+						},
+					},
+				},
+			},
+			"strengths": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "string"},
+			},
+			"test_suggestions": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "string"},
+			},
+			"merge_readiness": map[string]any{
+				"type": "string",
+				"enum": []string{"needs_human_review", "ready_for_manual_approval"},
+			},
+		},
+	}
 }

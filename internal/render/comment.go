@@ -44,6 +44,11 @@ func ReviewComment(result review.Result, marker string, outcome ReviewOutcome) s
 		testSuggestions = strings.Join(lines, "\n")
 	}
 
+	confidenceText := "unavailable"
+	if result.ConfidenceSet {
+		confidenceText = fmt.Sprintf("%.2f", result.Confidence)
+	}
+
 	return fmt.Sprintf(`%s
 ## PR Agent Review
 
@@ -51,7 +56,7 @@ func ReviewComment(result review.Result, marker string, outcome ReviewOutcome) s
 %s
 
 ### Risk
-%s | confidence=%.2f
+%s | confidence=%s
 
 ### Findings
 %s
@@ -63,7 +68,7 @@ func ReviewComment(result review.Result, marker string, outcome ReviewOutcome) s
 %s
 
 ### Note
-这是自动化审核摘要，不代替最终人工审批。`, marker, result.Summary, strings.ToUpper(result.OverallRisk), result.Confidence, findings, strengths, testSuggestions)
+这是自动化审核摘要，不代替最终人工审批。`, marker, result.Summary, strings.ToUpper(result.OverallRisk), confidenceText, findings, strengths, testSuggestions)
 }
 
 func FinalStatusComment(outcome ReviewOutcome) string {
@@ -78,6 +83,10 @@ func reviewStatusMessage(outcome ReviewOutcome) string {
 	switch outcome.ActionStatus {
 	case "merged":
 		return "Accepted. Thank you for your contribution!"
+	case "completed":
+		if outcome.ActionTaken == "merge" {
+			return "Accepted. Thank you for your contribution!"
+		}
 	case "merge_permission_denied":
 		return "Accepted for merge, but the current GitHub token does not have permission to complete the merge automatically."
 	case "branch_update_requested":
@@ -85,4 +94,5 @@ func reviewStatusMessage(outcome ReviewOutcome) string {
 	default:
 		return ""
 	}
+	return ""
 }
