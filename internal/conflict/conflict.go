@@ -22,7 +22,7 @@ const (
 )
 
 type Resolver interface {
-	Resolve(pull github.Pull, reviewResult review.Result, mode string) (Outcome, error)
+	Resolve(pull github.Pull, reviewResult review.Result, mode string, cached []ResolvedFile) (Outcome, error)
 }
 
 type Outcome struct {
@@ -33,11 +33,13 @@ type Outcome struct {
 	ConflictFiles       []FileConflict
 	ConflictSummary     review.ConflictSummary
 	ResolutionSummaries []string
+	ResolvedFiles       []ResolvedFile
 }
 
 type RetryableError struct {
 	Step    string
 	Message string
+	ResolvedFiles []ResolvedFile
 }
 
 func (e RetryableError) Error() string {
@@ -53,6 +55,13 @@ type FileConflict struct {
 	CurrentContent  string
 	IncomingContent string
 	ConflictMarkers string
+}
+
+type ResolvedFile struct {
+	Path       string `json:"path"`
+	Content    string `json:"content"`
+	Summary    string `json:"summary"`
+	Confidence float64 `json:"confidence"`
 }
 
 type conflictBlock struct {
@@ -109,7 +118,7 @@ func NewGitResolver(token, tempDir, userName, userEmail string, agent *review.Ag
 	}
 }
 
-func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode string) (Outcome, error) {
+func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode string, cached []ResolvedFile) (Outcome, error) {
 	if r.Runner == nil {
 		r.Runner = execRunner{}
 	}
@@ -128,10 +137,8 @@ func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode
 	defer os.RemoveAll(workspace)
 
 	repoDir := filepath.Join(workspace, "repo")
-ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
-	if _, err := r.runGitStepWithRetry(ctx, "", "clone", "git", "clone", "--branch", pull.Head.Ref, "--single-branch", withToken(pull.Head.Repo.CloneURL, r.Token), repoDir); err != nil {		return Outcome{}, err
+	if _, err := r.runGitStepWithRetry("", "clone", "git", "clone", "--branch", pull.Head.Ref, "--single-branch", withToken(pull.Head.Repo.CloneURL, r.Token), repoDir); err != nil {
+		return Outcome{}, err
 	}
 	if _, err := r.runStep(repoDir, "git", "config", "user.name", fallback(r.UserName, "pr-agent-go")); err != nil {
 		return Outcome{}, err
@@ -143,7 +150,8 @@ ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	if _, err := r.runStep(repoDir, "git", "remote", "add", "upstream", withToken(pull.Base.Repo.CloneURL, r.Token)); err != nil && !strings.Contains(err.Error(), "already exists") {
 		return Outcome{}, err
 	}
-if _, err := r.runGitStepWithRetry(ctx, repoDir, "fetch", "git", "fetch", "upstream", pull.Base.Ref); err != nil {		return Outcome{}, err
+	if _, err := r.runGitStepWithRetry(repoDir, "fetch", "git", "fetch", "upstream", pull.Base.Ref); err != nil {
+		return Outcome{}, err
 	}
 
 	log.Printf("conflict merge setup repo=%s pr=%d", pull.Base.Repo.FullName, pull.Number)
@@ -174,6 +182,11 @@ if _, err := r.runGitStepWithRetry(ctx, repoDir, "fetch", "git", "fetch", "upstr
 	outcome := Outcome{
 		Mode:          mode,
 		ConflictFiles: conflicts,
+		ResolvedFiles: make([]ResolvedFile, 0, len(conflicts)),
+	}
+	cachedByPath := make(map[string]ResolvedFile, len(cached))
+	for _, item := range cached {
+		cachedByPath[item.Path] = item
 	}
 
 	if mode == ModeSuggestOnly {
@@ -206,6 +219,22 @@ if _, err := r.runGitStepWithRetry(ctx, repoDir, "fetch", "git", "fetch", "upstr
 		}
 		log.Printf("conflict auto-resolve batch %d-%d/%d repo=%s pr=%d", start+1, end, len(conflicts), pull.Base.Repo.FullName, pull.Number)
 		for _, file := range conflicts[start:end] {
+			if cachedFile, ok := cachedByPath[file.Path]; ok {
+				fullPath := filepath.Join(repoDir, file.Path)
+				if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+					return Outcome{}, err
+				}
+				if err := os.WriteFile(fullPath, []byte(cachedFile.Content), 0o644); err != nil {
+					return Outcome{}, err
+				}
+				if _, err := r.runStep(repoDir, "git", "add", file.Path); err != nil {
+					return Outcome{}, err
+				}
+				log.Printf("conflict file restored-from-cache repo=%s pr=%d path=%s confidence=%.2f", pull.Base.Repo.FullName, pull.Number, file.Path, cachedFile.Confidence)
+				resolutionSummaries = append(resolutionSummaries, fmt.Sprintf("%s: %s", file.Path, cachedFile.Summary))
+				outcome.ResolvedFiles = append(outcome.ResolvedFiles, cachedFile)
+				continue
+			}
 			log.Printf("conflict file start repo=%s pr=%d path=%s mode=%s", pull.Base.Repo.FullName, pull.Number, file.Path, mode)
 			if !isResolvableFile(file, mode) {
 				log.Printf("conflict file blocked repo=%s pr=%d path=%s reason=unresolvable_file", pull.Base.Repo.FullName, pull.Number, file.Path)
@@ -223,6 +252,7 @@ if _, err := r.runGitStepWithRetry(ctx, repoDir, "fetch", "git", "fetch", "upstr
 			resolvedContent, decisionSummary, decisionConfidence, err := r.resolveConflictFile(pull, reviewResult, file, mode)
 			if err != nil {
 				if retryable, ok := err.(RetryableError); ok {
+					retryable.ResolvedFiles = append([]ResolvedFile{}, outcome.ResolvedFiles...)
 					return Outcome{}, retryable
 				}
 				log.Printf("conflict file failed repo=%s pr=%d path=%s reason=resolve_file err=%v", pull.Base.Repo.FullName, pull.Number, file.Path, err)
@@ -249,6 +279,12 @@ if _, err := r.runGitStepWithRetry(ctx, repoDir, "fetch", "git", "fetch", "upstr
 			}
 			log.Printf("conflict file applied repo=%s pr=%d path=%s confidence=%.2f", pull.Base.Repo.FullName, pull.Number, file.Path, decisionConfidence)
 			resolutionSummaries = append(resolutionSummaries, fmt.Sprintf("%s: %s", file.Path, decisionSummary))
+			outcome.ResolvedFiles = append(outcome.ResolvedFiles, ResolvedFile{
+				Path:       file.Path,
+				Content:    resolvedContent,
+				Summary:    decisionSummary,
+				Confidence: decisionConfidence,
+			})
 		}
 	}
 
@@ -641,7 +677,8 @@ func (r *GitResolver) effectiveStepTimeout() time.Duration {
 func (r *GitResolver) runGitStepWithRetry(dir string, step string, name string, args ...string) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		output, err := r.runStep(dir, name, args...)		if err == nil {
+		output, err := r.runStep(dir, name, args...)
+		if err == nil {
 			return output, nil
 		}
 		lastErr = err

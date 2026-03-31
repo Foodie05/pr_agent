@@ -61,6 +61,7 @@ type ConflictRetry struct {
 	OperatorGoal     string `json:"operatorGoal,omitempty"`
 	Pull             any    `json:"pull"`
 	ReviewResult     any    `json:"reviewResult"`
+	ResolvedFiles    any    `json:"resolvedFiles,omitempty"`
 	FailedStep       string `json:"failedStep"`
 	ErrorMessage     string `json:"errorMessage"`
 	CreatedAt        string `json:"createdAt"`
