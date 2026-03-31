@@ -68,6 +68,17 @@ type IssueComment struct {
 	Body string `json:"body"`
 }
 
+type RepositoryWebhook struct {
+	ID     int64    `json:"id"`
+	Active bool     `json:"active"`
+	Events []string `json:"events"`
+	Config struct {
+		URL         string `json:"url"`
+		ContentType string `json:"content_type"`
+		InsecureSSL string `json:"insecure_ssl"`
+	} `json:"config"`
+}
+
 func New(baseURL, token, marker string) *Client {
 	return &Client{
 		BaseURL:             strings.TrimRight(baseURL, "/"),
@@ -123,6 +134,45 @@ func (c *Client) ListIssueComments(repoFullName string, issueNumber int) ([]Issu
 	var comments []IssueComment
 	err := c.requestJSON(http.MethodGet, fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repoFullName, issueNumber), nil, &comments)
 	return comments, err
+}
+
+func (c *Client) ListRepositoryWebhooks(repoFullName string) ([]RepositoryWebhook, error) {
+	var hooks []RepositoryWebhook
+	err := c.requestJSON(http.MethodGet, fmt.Sprintf("/repos/%s/hooks?per_page=100", repoFullName), nil, &hooks)
+	return hooks, err
+}
+
+func (c *Client) CreateRepositoryWebhook(repoFullName, webhookURL, secret string, events []string) (RepositoryWebhook, error) {
+	payload := map[string]any{
+		"name":   "web",
+		"active": true,
+		"events": events,
+		"config": map[string]string{
+			"url":          webhookURL,
+			"content_type": "json",
+			"insecure_ssl": "0",
+			"secret":       secret,
+		},
+	}
+	var hook RepositoryWebhook
+	err := c.requestJSON(http.MethodPost, fmt.Sprintf("/repos/%s/hooks", repoFullName), payload, &hook)
+	return hook, err
+}
+
+func (c *Client) UpdateRepositoryWebhook(repoFullName string, hookID int64, webhookURL, secret string, events []string) (RepositoryWebhook, error) {
+	payload := map[string]any{
+		"active": true,
+		"events": events,
+		"config": map[string]string{
+			"url":          webhookURL,
+			"content_type": "json",
+			"insecure_ssl": "0",
+			"secret":       secret,
+		},
+	}
+	var hook RepositoryWebhook
+	err := c.requestJSON(http.MethodPatch, fmt.Sprintf("/repos/%s/hooks/%d", repoFullName, hookID), payload, &hook)
+	return hook, err
 }
 
 func (c *Client) UpsertManagedReviewComment(repoFullName string, issueNumber int, body string) (IssueComment, error) {
