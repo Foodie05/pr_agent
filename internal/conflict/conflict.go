@@ -339,61 +339,64 @@ func (r *GitResolver) resolveConflictFile(pull github.Pull, reviewResult review.
 }
 
 func (r *GitResolver) resolveConflictFileByBlocks(pull github.Pull, reviewResult review.Result, file FileConflict, mode string) (string, string, float64, error) {
-	blocks := extractConflictBlocks(file.ConflictMarkers)
-	if len(blocks) == 0 {
-		return "", "", 0, fmt.Errorf("no conflict blocks found for %s", file.Path)
-	}
-
 	resolved := file.ConflictMarkers
-	summaries := make([]string, 0, len(blocks))
+	summaries := make([]string, 0, 4)
 	minConfidence := 1.0
-	offset := 0
-	for index, block := range blocks {
-		log.Printf("conflict block start repo=%s pr=%d path=%s block=%d/%d", pull.Base.Repo.FullName, pull.Number, file.Path, index+1, len(blocks))
-		decision, err := r.Agent.ResolveConflictBlock(review.ConflictContext{
-			RepoFullName:    pull.Base.Repo.FullName,
-			PRNumber:        pull.Number,
-			PullTitle:       pull.Title,
-			FilePath:        file.Path,
-			BlockIndex:      index + 1,
-			BlockCount:      len(blocks),
-			OperatorGoal:    reviewResult.OperatorGoal,
-			ReviewSummary:   reviewResult.Summary,
-			OverallRisk:     reviewResult.OverallRisk,
-			BaseContent:     block.Before,
-			CurrentContent:  block.Before,
-			IncomingContent: block.After,
-			ConflictMarkers: block.BlockText,
-		})
-		if err != nil {
-			if review.IsRetryableModelError(err) {
-				return "", "", 0, RetryableError{Step: fmt.Sprintf("resolve_conflict_block:%s:%d", file.Path, index+1), Message: err.Error()}
+	for pass := 0; pass < 3; pass++ {
+		blocks := extractConflictBlocks(resolved)
+		if len(blocks) == 0 {
+			break
+		}
+		log.Printf("conflict block pass repo=%s pr=%d path=%s pass=%d remaining_blocks=%d", pull.Base.Repo.FullName, pull.Number, file.Path, pass+1, len(blocks))
+		offset := 0
+		for index, block := range blocks {
+			log.Printf("conflict block start repo=%s pr=%d path=%s block=%d/%d pass=%d", pull.Base.Repo.FullName, pull.Number, file.Path, index+1, len(blocks), pass+1)
+			decision, err := r.Agent.ResolveConflictBlock(review.ConflictContext{
+				RepoFullName:    pull.Base.Repo.FullName,
+				PRNumber:        pull.Number,
+				PullTitle:       pull.Title,
+				FilePath:        file.Path,
+				BlockIndex:      index + 1,
+				BlockCount:      len(blocks),
+				OperatorGoal:    reviewResult.OperatorGoal,
+				ReviewSummary:   reviewResult.Summary,
+				OverallRisk:     reviewResult.OverallRisk,
+				BaseContent:     block.Before,
+				CurrentContent:  block.Before,
+				IncomingContent: block.After,
+				ConflictMarkers: block.BlockText,
+			})
+			if err != nil {
+				if review.IsRetryableModelError(err) {
+					return "", "", 0, RetryableError{Step: fmt.Sprintf("resolve_conflict_block:%s:%d", file.Path, index+1), Message: err.Error()}
+				}
+				return "", "", 0, err
 			}
-			return "", "", 0, err
-		}
-		if strings.TrimSpace(decision.ResolvedBlock) == "" {
-			return "", "", 0, fmt.Errorf("empty block resolution for %s block %d", file.Path, index+1)
-		}
-		if strings.Contains(decision.ResolvedBlock, "<<<<<<<") {
-			return "", "", 0, fmt.Errorf("block resolution still contains conflict markers for %s block %d", file.Path, index+1)
-		}
-		if mode != ModeForceResolve && (!decision.ShouldApply || decision.Confidence < 0.8) {
-			return "", "", 0, fmt.Errorf("low confidence block resolution for %s block %d", file.Path, index+1)
-		}
+			if strings.TrimSpace(decision.ResolvedBlock) == "" {
+				return "", "", 0, fmt.Errorf("empty block resolution for %s block %d", file.Path, index+1)
+			}
+			if strings.Contains(decision.ResolvedBlock, "<<<<<<<") {
+				return "", "", 0, fmt.Errorf("block resolution still contains conflict markers for %s block %d", file.Path, index+1)
+			}
+			if mode != ModeForceResolve && (!decision.ShouldApply || decision.Confidence < 0.8) {
+				return "", "", 0, fmt.Errorf("low confidence block resolution for %s block %d", file.Path, index+1)
+			}
 
-		start := block.StartMarker + offset
-		end := block.EndMarker + offset
-		resolved = resolved[:start] + decision.ResolvedBlock + resolved[end:]
-		offset += len(decision.ResolvedBlock) - (block.EndMarker - block.StartMarker)
-		summaries = append(summaries, fmt.Sprintf("block %d: %s", index+1, decision.Summary))
-		if decision.Confidence < minConfidence {
-			minConfidence = decision.Confidence
+			start := block.StartMarker + offset
+			end := block.EndMarker + offset
+			resolved = resolved[:start] + decision.ResolvedBlock + resolved[end:]
+			offset += len(decision.ResolvedBlock) - (block.EndMarker - block.StartMarker)
+			summaries = append(summaries, fmt.Sprintf("pass %d block %d: %s", pass+1, index+1, decision.Summary))
+			if decision.Confidence < minConfidence {
+				minConfidence = decision.Confidence
+			}
+			log.Printf("conflict block applied repo=%s pr=%d path=%s block=%d/%d pass=%d confidence=%.2f", pull.Base.Repo.FullName, pull.Number, file.Path, index+1, len(blocks), pass+1, decision.Confidence)
 		}
-		log.Printf("conflict block applied repo=%s pr=%d path=%s block=%d/%d confidence=%.2f", pull.Base.Repo.FullName, pull.Number, file.Path, index+1, len(blocks), decision.Confidence)
 	}
 
-	if strings.Contains(resolved, "<<<<<<<") {
-		return "", "", 0, fmt.Errorf("resolved file still contains conflict markers for %s", file.Path)
+	if remaining := countConflictMarkers(resolved); remaining > 0 {
+		log.Printf("conflict file still has unresolved markers repo=%s pr=%d path=%s remaining_blocks=%d", pull.Base.Repo.FullName, pull.Number, file.Path, remaining)
+		return "", "", 0, fmt.Errorf("resolved file still contains conflict markers for %s (%d remaining blocks)", file.Path, remaining)
 	}
 	return resolved, strings.Join(summaries, " | "), minConfidence, nil
 }

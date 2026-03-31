@@ -902,6 +902,7 @@ func isExplicitAcceptanceNote(note string) bool {
 		"approved for merge",
 		"force merge",
 		"merge directly",
+		"merge it directly",
 		"merge now",
 		"just merge it",
 		"直接合并",
