@@ -128,8 +128,10 @@ func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode
 	defer os.RemoveAll(workspace)
 
 	repoDir := filepath.Join(workspace, "repo")
-	if _, err := r.runGitStepWithRetry("", "clone", "git", "clone", "--branch", pull.Head.Ref, "--single-branch", withToken(pull.Head.Repo.CloneURL, r.Token), repoDir); err != nil {
-		return Outcome{}, err
+ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	if _, err := r.runGitStepWithRetry(ctx, "", "clone", "git", "clone", "--branch", pull.Head.Ref, "--single-branch", withToken(pull.Head.Repo.CloneURL, r.Token), repoDir); err != nil {		return Outcome{}, err
 	}
 	if _, err := r.runStep(repoDir, "git", "config", "user.name", fallback(r.UserName, "pr-agent-go")); err != nil {
 		return Outcome{}, err
@@ -141,8 +143,7 @@ func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode
 	if _, err := r.runStep(repoDir, "git", "remote", "add", "upstream", withToken(pull.Base.Repo.CloneURL, r.Token)); err != nil && !strings.Contains(err.Error(), "already exists") {
 		return Outcome{}, err
 	}
-	if _, err := r.runGitStepWithRetry(repoDir, "fetch", "git", "fetch", "upstream", pull.Base.Ref); err != nil {
-		return Outcome{}, err
+if _, err := r.runGitStepWithRetry(ctx, repoDir, "fetch", "git", "fetch", "upstream", pull.Base.Ref); err != nil {		return Outcome{}, err
 	}
 
 	log.Printf("conflict merge setup repo=%s pr=%d", pull.Base.Repo.FullName, pull.Number)
@@ -640,8 +641,7 @@ func (r *GitResolver) effectiveStepTimeout() time.Duration {
 func (r *GitResolver) runGitStepWithRetry(dir string, step string, name string, args ...string) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		output, err := r.runStep(dir, name, args...)
-		if err == nil {
+		output, err := r.runStep(dir, name, args...)		if err == nil {
 			return output, nil
 		}
 		lastErr = err

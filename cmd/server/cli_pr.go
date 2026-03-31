@@ -121,6 +121,38 @@ func runRecheckConflict(cfg config.Config, store *storage.FileStorage, args []st
 	return nil
 }
 
+func runRecheckConflict(cfg config.Config, store *storage.FileStorage, args []string, jsonOutput bool) error {
+	repoFullName, prNumber, err := parseRepoAndPR(args, "recheck")
+	if err != nil {
+		return err
+	}
+
+	service := newService(cfg, store)
+	progress := func(stage string, details string) {
+		fmt.Fprintf(os.Stderr, "[%s] %s: %s\n", time.Now().Format(time.RFC3339), stage, details)
+	}
+
+	result, err := service.RecheckConflict(repoFullName, prNumber, "manual_recheck_cli", progress)
+	if err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		return printJSON(result)
+	}
+
+	fmt.Printf("Rechecked %s #%d\n", result.RepoFullName, result.PRNumber)
+	fmt.Printf("Head SHA: %s\n", result.HeadSHA)
+	fmt.Printf("Risk: %s\n", result.OverallRisk)
+	fmt.Printf("Trust: %s\n", emptyDash(result.TrustLevel))
+	fmt.Printf("Action: %s (%s)\n", emptyDash(result.ActionTaken), emptyDash(result.ActionStatus))
+	if result.ActionDetails != "" {
+		fmt.Printf("Action Details: %s\n", result.ActionDetails)
+	}
+	fmt.Printf("Stage Timings: %s\n", formatStageDurations(result.StageDurationsMS))
+	return nil
+}
+
 func runRegisterWebhook(cfg config.Config, args []string, jsonOutput bool) error {
 	repoFullName, err := parseRepoOnly(args, "add")
 	if err != nil {
