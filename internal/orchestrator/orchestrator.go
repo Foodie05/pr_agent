@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -404,6 +406,87 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 		HeadSHA:          pull.Head.SHA,
 		OverallRisk:      overallRisk,
 		TrustLevel:       trustLevel,
+		ActionTaken:      action.ActionTaken,
+		ActionStatus:     action.ActionStatus,
+		ActionDetails:    action.ActionDetails,
+		StageDurationsMS: recorder.Durations(),
+		TotalDurationMS:  recorder.TotalMS(),
+	}, nil
+}
+
+func (s *Service) RecheckConflict(repoFullName string, prNumber int, triggerEvent string, progress ProgressFunc) (Result, error) {
+	recorder := newStageRecorder(progress)
+
+	done := recorder.Start("load_retry", fmt.Sprintf("loading cached conflict retry for %s #%d", repoFullName, prNumber))
+	entry, found, err := s.Storage.FindConflictRetry(repoFullName, prNumber)
+	done(err)
+	if err != nil {
+		return Result{StageDurationsMS: recorder.Durations(), TotalDurationMS: recorder.TotalMS()}, err
+	}
+	if !found {
+		return Result{StageDurationsMS: recorder.Durations(), TotalDurationMS: recorder.TotalMS()}, fmt.Errorf("no cached conflict retry found for %s #%d", repoFullName, prNumber)
+	}
+
+	pull, reviewResult, err := decodeConflictRetry(entry)
+	if err != nil {
+		return Result{StageDurationsMS: recorder.Durations(), TotalDurationMS: recorder.TotalMS()}, err
+	}
+
+	done = recorder.Start("recheck_conflict", fmt.Sprintf("retrying conflict workflow from cached %s step", entry.FailedStep))
+	outcome, err := s.resolveConflictsForPull(repoFullName, prNumber, pull, reviewResult, entry.AllowAutoResolve)
+	done(err)
+	if err != nil {
+		return Result{
+			RepoFullName:     repoFullName,
+			PRNumber:         prNumber,
+			HeadSHA:          pull.Head.SHA,
+			OverallRisk:      reviewResult.OverallRisk,
+			TrustLevel:       entry.TrustLevel,
+			ActionTaken:      "recheck_conflict",
+			ActionStatus:     "failed",
+			ActionDetails:    err.Error(),
+			StageDurationsMS: recorder.Durations(),
+			TotalDurationMS:  recorder.TotalMS(),
+		}, err
+	}
+
+	action, err := s.completeConflictOutcome(repoFullName, prNumber, pull, outcome, entry.TrustLevel)
+	if err != nil {
+		return Result{
+			RepoFullName:     repoFullName,
+			PRNumber:         prNumber,
+			HeadSHA:          pull.Head.SHA,
+			OverallRisk:      reviewResult.OverallRisk,
+			TrustLevel:       entry.TrustLevel,
+			ActionTaken:      action.ActionTaken,
+			ActionStatus:     "failed",
+			ActionDetails:    err.Error(),
+			StageDurationsMS: recorder.Durations(),
+			TotalDurationMS:  recorder.TotalMS(),
+		}, err
+	}
+
+	_ = s.Storage.DeleteConflictRetry(repoFullName, prNumber)
+	if finalCommentBody := render.FinalStatusComment(render.ReviewOutcome{
+		ActionTaken:  action.ActionTaken,
+		ActionStatus: action.ActionStatus,
+	}); finalCommentBody != "" {
+		done = recorder.Start("final_comment", fmt.Sprintf("publishing final status comment to %s #%d", repoFullName, prNumber))
+		_, commentErr := s.GitHub.CreateIssueComment(repoFullName, prNumber, finalCommentBody)
+		done(commentErr)
+		if commentErr != nil {
+			return Result{StageDurationsMS: recorder.Durations(), TotalDurationMS: recorder.TotalMS()}, commentErr
+		}
+	}
+
+	emitProgress(progress, "summary", recorder.Summary())
+	return Result{
+		OK:               true,
+		RepoFullName:     repoFullName,
+		PRNumber:         prNumber,
+		HeadSHA:          pull.Head.SHA,
+		OverallRisk:      reviewResult.OverallRisk,
+		TrustLevel:       entry.TrustLevel,
 		ActionTaken:      action.ActionTaken,
 		ActionStatus:     action.ActionStatus,
 		ActionDetails:    action.ActionDetails,
@@ -864,7 +947,17 @@ func (s *Service) resolveConflictsForPull(repoFullName string, prNumber int, pul
 	if allowAutoResolve {
 		mode = conflict.ModeAutoResolve
 	}
-	return s.ConflictResolver.Resolve(pull, reviewResult, mode)
+	outcome, err := s.ConflictResolver.Resolve(pull, reviewResult, mode)
+	if err != nil {
+		var retryable conflict.RetryableError
+		if errors.As(err, &retryable) {
+			_ = s.cacheConflictRetry(repoFullName, prNumber, pull, reviewResult, allowAutoResolve, retryable)
+			body := fmt.Sprintf("## PR Agent Action Required\n\n冲突处理在 `%s` 步骤因网络或超时失败，已缓存当前状态。请稍后使用 `recheck owner/repo pr_number` 从冲突处理步骤继续。\n\n错误信息：`%s`", retryable.Step, retryable.Message)
+			_, _ = s.GitHub.CreateIssueComment(repoFullName, prNumber, body)
+		}
+		return conflict.Outcome{}, err
+	}
+	return outcome, nil
 }
 
 func (s *Service) completeConflictOutcome(repoFullName string, prNumber int, pull github.Pull, outcome conflict.Outcome, trustLevel string) (autoAction, error) {
@@ -987,4 +1080,40 @@ func isApprovalRequiredError(err error) bool {
 	return strings.Contains(message, "approving review is required") ||
 		strings.Contains(message, "at least 1 approving review is required") ||
 		strings.Contains(message, "repository rule violations found")
+}
+func (s *Service) cacheConflictRetry(repoFullName string, prNumber int, pull github.Pull, reviewResult review.Result, allowAutoResolve bool, retryable conflict.RetryableError) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	return s.Storage.SaveConflictRetry(storage.ConflictRetry{
+		RepoFullName:     repoFullName,
+		PRNumber:         prNumber,
+		HeadSHA:          pull.Head.SHA,
+		TrustLevel:       decideTrustLevel(pull, github.CommitStatus{}, reviewResult),
+		AllowAutoResolve: allowAutoResolve,
+		Pull:             pull,
+		ReviewResult:     reviewResult,
+		FailedStep:       retryable.Step,
+		ErrorMessage:     retryable.Message,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	})
+}
+
+func decodeConflictRetry(entry storage.ConflictRetry) (github.Pull, review.Result, error) {
+	var pull github.Pull
+	var result review.Result
+	pullBytes, err := json.Marshal(entry.Pull)
+	if err != nil {
+		return github.Pull{}, review.Result{}, err
+	}
+	if err := json.Unmarshal(pullBytes, &pull); err != nil {
+		return github.Pull{}, review.Result{}, err
+	}
+	resultBytes, err := json.Marshal(entry.ReviewResult)
+	if err != nil {
+		return github.Pull{}, review.Result{}, err
+	}
+	if err := json.Unmarshal(resultBytes, &result); err != nil {
+		return github.Pull{}, review.Result{}, err
+	}
+	return pull, result, nil
 }
