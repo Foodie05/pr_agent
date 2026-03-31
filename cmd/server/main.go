@@ -45,10 +45,11 @@ func main() {
 		if err := runIntervenePR(cfg, store, os.Args[1:], hasJSONFlag(os.Args[1:])); err != nil {
 			log.Fatal(err)
 		}
-case "recheck":
+	case "recheck":
 		if err := runRecheckConflict(cfg, store, os.Args[1:], hasJSONFlag(os.Args[1:])); err != nil {
 			log.Fatal(err)
-		}	case "add":
+		}
+	case "add":
 		if err := runRegisterWebhook(cfg, os.Args[1:], hasJSONFlag(os.Args[1:])); err != nil {
 			log.Fatal(err)
 		}
@@ -63,7 +64,8 @@ func resolveCommand(args []string) string {
 		return "serve"
 	}
 	switch args[0] {
-case "serve", "status", "stats", "doctor", "logs", "review", "check", "recheck", "add":		return args[0]
+	case "serve", "status", "stats", "doctor", "logs", "review", "check", "recheck", "add":
+		return args[0]
 	case "review-pr":
 		return "review"
 	case "intervene-pr":

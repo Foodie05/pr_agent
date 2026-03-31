@@ -668,18 +668,6 @@ func TestInterveneExplicitAcceptanceOverridesRiskAndConfidence(t *testing.T) {
 	}
 }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-func githubClientWithHTTPClient(baseURL, token, marker string, transport http.RoundTripper) *github.Client {
-	client := github.New(baseURL, token, marker)
-	client.HTTPClient = &http.Client{Transport: transport}
-	return client
-}
-
 func jsonResponse(t *testing.T, value any) (*http.Response, error) {
 	t.Helper()
 	data, err := json.Marshal(value)
