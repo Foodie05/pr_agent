@@ -39,3 +39,20 @@ func TestUnresolvedConflictBlockCountIgnoresStringLiterals(t *testing.T) {
 		t.Fatalf("expected string literal marker text to be ignored, got %d", unresolvedConflictBlockCount(content))
 	}
 }
+
+func TestIsResolvableFileAllowsLargerTextFilesInForceMode(t *testing.T) {
+	large := strings.Repeat("a", 41000)
+	file := FileConflict{
+		Path:            "internal/orchestrator/orchestrator.go",
+		BaseContent:     large,
+		CurrentContent:  large,
+		IncomingContent: large,
+		ConflictMarkers: "<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> main\n",
+	}
+	if isResolvableFile(file, ModeAutoResolve) {
+		t.Fatalf("expected auto resolve mode to reject oversized file")
+	}
+	if !isResolvableFile(file, ModeForceResolve) {
+		t.Fatalf("expected force resolve mode to allow larger text file")
+	}
+}

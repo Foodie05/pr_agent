@@ -206,7 +206,7 @@ func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode
 		log.Printf("conflict auto-resolve batch %d-%d/%d repo=%s pr=%d", start+1, end, len(conflicts), pull.Base.Repo.FullName, pull.Number)
 		for _, file := range conflicts[start:end] {
 			log.Printf("conflict file start repo=%s pr=%d path=%s mode=%s", pull.Base.Repo.FullName, pull.Number, file.Path, mode)
-			if !isResolvableFile(file) {
+			if !isResolvableFile(file, mode) {
 				log.Printf("conflict file blocked repo=%s pr=%d path=%s reason=unresolvable_file", pull.Base.Repo.FullName, pull.Number, file.Path)
 				if mode == ModeForceResolve {
 					return Outcome{}, fmt.Errorf("force conflict resolution cannot safely handle file %s", file.Path)
@@ -570,11 +570,15 @@ func withToken(cloneURL, token string) string {
 	return strings.Replace(cloneURL, "https://", "https://x-access-token:"+token+"@", 1)
 }
 
-func isResolvableFile(file FileConflict) bool {
+func isResolvableFile(file FileConflict, mode string) bool {
 	if strings.Contains(file.Path, ".lock") || strings.Contains(file.Path, ".png") || strings.Contains(file.Path, ".jpg") || strings.Contains(file.Path, ".jpeg") || strings.Contains(file.Path, ".gif") || strings.Contains(file.Path, ".pdf") {
 		return false
 	}
-	if len(file.ConflictMarkers) > 40000 || len(file.BaseContent) > 40000 || len(file.CurrentContent) > 40000 || len(file.IncomingContent) > 40000 {
+	limit := 40000
+	if mode == ModeForceResolve {
+		limit = 120000
+	}
+	if len(file.ConflictMarkers) > limit || len(file.BaseContent) > limit || len(file.CurrentContent) > limit || len(file.IncomingContent) > limit {
 		return false
 	}
 	return true
