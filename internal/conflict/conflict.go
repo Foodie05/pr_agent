@@ -375,7 +375,17 @@ func (r *GitResolver) resolveConflictFileByBlocks(pull github.Pull, reviewResult
 				return "", "", 0, err
 			}
 			if strings.TrimSpace(decision.ResolvedBlock) == "" {
-				return "", "", 0, fmt.Errorf("empty block resolution for %s block %d", file.Path, index+1)
+				if mode == ModeForceResolve {
+					decision.ResolvedBlock = forceResolveBlockFallback(block)
+					decision.Summary = "force fallback to current branch content"
+					if decision.Confidence <= 0 {
+						decision.Confidence = 0.95
+					}
+					decision.ShouldApply = true
+					log.Printf("conflict block fallback repo=%s pr=%d path=%s block=%d/%d pass=%d strategy=prefer_current reason=empty_resolution", pull.Base.Repo.FullName, pull.Number, file.Path, index+1, len(blocks), pass+1)
+				} else {
+					return "", "", 0, fmt.Errorf("empty block resolution for %s block %d", file.Path, index+1)
+				}
 			}
 			if hasConflictBlocks(decision.ResolvedBlock) {
 				return "", "", 0, fmt.Errorf("block resolution still contains conflict markers for %s block %d", file.Path, index+1)
@@ -520,6 +530,16 @@ func resolveRemainingBlocksPreferCurrent(content string) string {
 		}
 	}
 	return builder.String()
+}
+
+func forceResolveBlockFallback(block conflictBlock) string {
+	if strings.TrimSpace(block.CurrentPart) != "" {
+		return block.CurrentPart
+	}
+	if strings.TrimSpace(block.IncomingPart) != "" {
+		return block.IncomingPart
+	}
+	return ""
 }
 
 func (r *GitResolver) collectConflicts(ctx context.Context, repoDir string) ([]FileConflict, error) {

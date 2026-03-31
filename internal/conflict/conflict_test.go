@@ -56,3 +56,23 @@ func TestIsResolvableFileAllowsLargerTextFilesInForceMode(t *testing.T) {
 		t.Fatalf("expected force resolve mode to allow larger text file")
 	}
 }
+
+func TestForceResolveBlockFallbackPrefersCurrent(t *testing.T) {
+	block := conflictBlock{
+		CurrentPart:  "keep current\n",
+		IncomingPart: "take incoming\n",
+	}
+	if got := forceResolveBlockFallback(block); got != "keep current\n" {
+		t.Fatalf("expected current part, got %q", got)
+	}
+}
+
+func TestForceResolveBlockFallbackUsesIncomingWhenCurrentEmpty(t *testing.T) {
+	block := conflictBlock{
+		CurrentPart:  "",
+		IncomingPart: "take incoming\n",
+	}
+	if got := forceResolveBlockFallback(block); got != "take incoming\n" {
+		t.Fatalf("expected incoming part, got %q", got)
+	}
+}
