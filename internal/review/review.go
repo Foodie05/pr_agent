@@ -1,0 +1,884 @@
+package review
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+)
+
+type Context struct {
+	RepoFullName string        `json:"repo"`
+	PRNumber     int           `json:"pr_number"`
+	Title        string        `json:"title"`
+	Body         string        `json:"body"`
+	Author       string        `json:"author"`
+	BaseRef      string        `json:"base_branch"`
+	HeadRef      string        `json:"head_branch"`
+	HeadSHA      string        `json:"head_sha"`
+	Draft        bool          `json:"draft"`
+	ChangedFiles []ChangedFile `json:"changed_files"`
+	CI           CIStatus      `json:"ci"`
+}
+
+type ChangedFile struct {
+	Filename  string `json:"path"`
+	Status    string `json:"status"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Patch     string `json:"patch"`
+}
+
+type CIStatus struct {
+	State      string `json:"status"`
+	TotalCount int    `json:"total_count"`
+}
+
+type Finding struct {
+	Severity   string `json:"severity"`
+	File       string `json:"file"`
+	Title      string `json:"title"`
+	Detail     string `json:"detail"`
+	Suggestion string `json:"suggestion"`
+}
+
+type Result struct {
+	Summary         string    `json:"summary"`
+	OverallRisk     string    `json:"overall_risk"`
+	Confidence      float64   `json:"confidence"`
+	Findings        []Finding `json:"findings"`
+	Strengths       []string  `json:"strengths"`
+	TestSuggestions []string  `json:"test_suggestions"`
+	MergeReadiness  string    `json:"merge_readiness"`
+	Provider        string    `json:"provider"`
+}
+
+type InterventionContext struct {
+	RepoFullName   string `json:"repo"`
+	PRNumber       int    `json:"pr_number"`
+	Title          string `json:"title"`
+	HeadSHA        string `json:"head_sha"`
+	Mergeable      *bool  `json:"mergeable,omitempty"`
+	MergeableState string `json:"mergeable_state,omitempty"`
+	CIState        string `json:"ci_state,omitempty"`
+	ReviewSummary  string `json:"review_summary,omitempty"`
+	OverallRisk    string `json:"overall_risk,omitempty"`
+	TrustLevel     string `json:"trust_level,omitempty"`
+	UserNote       string `json:"user_note"`
+}
+
+type InterventionDecision struct {
+	Action  string `json:"action"`
+	Comment string `json:"comment"`
+	Summary string `json:"summary"`
+}
+
+type ConflictContext struct {
+	RepoFullName    string `json:"repo"`
+	PRNumber        int    `json:"pr_number"`
+	PullTitle       string `json:"pull_title"`
+	FilePath        string `json:"file_path"`
+	ReviewSummary   string `json:"review_summary,omitempty"`
+	OverallRisk     string `json:"overall_risk,omitempty"`
+	BaseContent     string `json:"base_content"`
+	CurrentContent  string `json:"current_content"`
+	IncomingContent string `json:"incoming_content"`
+	ConflictMarkers string `json:"conflict_markers"`
+}
+
+type ConflictDecision struct {
+	ResolvedContent string  `json:"resolved_content"`
+	Summary         string  `json:"summary"`
+	Confidence      float64 `json:"confidence"`
+	ShouldApply     bool    `json:"should_apply"`
+}
+
+type ConflictSummaryContext struct {
+	RepoFullName  string                `json:"repo"`
+	PRNumber      int                   `json:"pr_number"`
+	PullTitle     string                `json:"pull_title"`
+	ReviewSummary string                `json:"review_summary,omitempty"`
+	OverallRisk   string                `json:"overall_risk,omitempty"`
+	Conflicts     []ConflictFileSummary `json:"conflicts"`
+}
+
+type ConflictFileSummary struct {
+	FilePath        string `json:"file_path"`
+	ConflictMarkers string `json:"conflict_markers"`
+}
+
+type ConflictSummary struct {
+	Summary     string   `json:"summary"`
+	Suggestions []string `json:"suggestions"`
+}
+
+type Agent struct {
+	APIBaseURL string
+	APIKey     string
+	Model      string
+	HTTPClient *http.Client
+}
+
+func NewAgent(apiBaseURL, apiKey, model string) *Agent {
+	return &Agent{
+		APIBaseURL: strings.TrimRight(apiBaseURL, "/"),
+		APIKey:     apiKey,
+		Model:      model,
+		HTTPClient: &http.Client{},
+	}
+}
+
+func (a *Agent) CheckConnection() error {
+	if a.APIKey == "" {
+		return fmt.Errorf("openai api key is empty")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, a.APIBaseURL+"/models/"+a.Model, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.APIKey)
+
+	resp, err := a.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+
+	modelCheckBody := strings.TrimSpace(string(body))
+	if !supportsModelsEndpoint(resp.StatusCode, modelCheckBody) {
+		return fmt.Errorf("model check failed: %d %s", resp.StatusCode, modelCheckBody)
+	}
+
+	compatibilityErr := a.checkChatCompletionsCompatibility()
+	if compatibilityErr == nil {
+		return nil
+	}
+	return compatibilityErr
+}
+
+func (a *Agent) checkChatCompletionsCompatibility() error {
+	requestBody := map[string]any{
+		"model":      a.Model,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+		"max_tokens": 1,
+	}
+
+	data, err := json.Marshal(requestBody)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, a.APIBaseURL+"/chat/completions", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	responseBody := strings.TrimSpace(string(body))
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+
+	if strings.Contains(responseBody, "insufficient_balance") {
+		return fmt.Errorf("model endpoint compatible, but account balance is insufficient")
+	}
+
+	return fmt.Errorf("chat completions compatibility check failed: %d %s", resp.StatusCode, responseBody)
+}
+
+func supportsModelsEndpoint(statusCode int, body string) bool {
+	if statusCode == http.StatusNotFound {
+		return true
+	}
+	lowerBody := strings.ToLower(body)
+	return strings.Contains(lowerBody, "no static resource") ||
+		strings.Contains(lowerBody, "not_found") ||
+		strings.Contains(lowerBody, "not found")
+}
+
+func (a *Agent) Review(context Context) (Result, error) {
+	if a.APIKey == "" {
+		result := heuristicReview(context)
+		result.Provider = "heuristic"
+		return result, nil
+	}
+
+	systemPrompt := `You are a pull request review assistant.
+You are not the final approver.
+Base your output only on the provided pull request context.
+Return valid JSON with keys:
+summary, overall_risk, confidence, findings, strengths, test_suggestions, merge_readiness.
+overall_risk must be one of: low, medium, high.
+merge_readiness must be one of: needs_human_review, ready_for_manual_approval.`
+
+	requestBody := map[string]any{
+		"model":       a.Model,
+		"temperature": 0.2,
+		"messages": []map[string]string{
+			{"role": "system", "content": systemPrompt},
+			{"role": "user", "content": mustJSON(context)},
+		},
+	}
+
+	data, err := json.Marshal(requestBody)
+	if err != nil {
+		return Result{}, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, a.APIBaseURL+"/chat/completions", bytes.NewReader(data))
+	if err != nil {
+		return Result{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.HTTPClient.Do(req)
+	if err != nil {
+		return Result{}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return Result{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return Result{}, fmt.Errorf("llm request failed: %d %s", resp.StatusCode, string(respBody))
+	}
+
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return Result{}, err
+	}
+	if len(parsed.Choices) == 0 {
+		return Result{}, fmt.Errorf("llm response missing choices")
+	}
+
+	raw := parsed.Choices[0].Message.Content
+	jsonPayload, err := extractJSONObject(raw)
+	if err != nil {
+		return Result{}, err
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(jsonPayload), &payload); err != nil {
+		return Result{}, err
+	}
+	result := resultFromMap(payload)
+	result = normalizeResult(result)
+	result.Provider = a.Model
+	return result, nil
+}
+
+func (a *Agent) ResolveIntervention(context InterventionContext) (InterventionDecision, error) {
+	if a.APIKey == "" {
+		return heuristicIntervention(context), nil
+	}
+
+	systemPrompt := `You are a pull request operations assistant.
+Read the current PR state, the latest automated review summary, and the user's note.
+Return valid JSON with keys: action, comment, summary.
+Allowed action values are: merge, update_branch, comment_only, re_review.
+Choose merge only when the user clearly approves merging.
+Choose update_branch only when the user asks to refresh/rebase/sync the branch or when the PR is trusted and merely behind.
+Choose comment_only when human action is still needed or the note is informational.
+Choose re_review when the user asks to rerun or refresh the automated review.
+The comment must be concise and suitable for posting on GitHub.`
+
+	requestBody := map[string]any{
+		"model":       a.Model,
+		"temperature": 0.1,
+		"messages": []map[string]string{
+			{"role": "system", "content": systemPrompt},
+			{"role": "user", "content": mustJSON(context)},
+		},
+	}
+
+	data, err := json.Marshal(requestBody)
+	if err != nil {
+		return InterventionDecision{}, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, a.APIBaseURL+"/chat/completions", bytes.NewReader(data))
+	if err != nil {
+		return InterventionDecision{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.HTTPClient.Do(req)
+	if err != nil {
+		return InterventionDecision{}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return InterventionDecision{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return InterventionDecision{}, fmt.Errorf("llm request failed: %d %s", resp.StatusCode, string(respBody))
+	}
+
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return InterventionDecision{}, err
+	}
+	if len(parsed.Choices) == 0 {
+		return InterventionDecision{}, fmt.Errorf("llm response missing choices")
+	}
+
+	raw := parsed.Choices[0].Message.Content
+	jsonPayload, err := extractJSONObject(raw)
+	if err != nil {
+		return InterventionDecision{}, err
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(jsonPayload), &payload); err != nil {
+		return InterventionDecision{}, err
+	}
+	return normalizeInterventionDecision(InterventionDecision{
+		Action:  stringValue(payload["action"]),
+		Comment: stringValue(payload["comment"]),
+		Summary: stringValue(payload["summary"]),
+	}), nil
+}
+
+func (a *Agent) ResolveConflict(context ConflictContext) (ConflictDecision, error) {
+	if a.APIKey == "" {
+		return ConflictDecision{}, fmt.Errorf("conflict auto-resolution requires model api key")
+	}
+
+	systemPrompt := `You are resolving a git merge conflict for a pull request.
+Return valid JSON with keys: resolved_content, summary, confidence, should_apply.
+Use only the provided file versions and conflict markers.
+should_apply must be true only if you are confident the merged file is correct and complete.
+resolved_content must contain the entire resolved file with no conflict markers.`
+
+	requestBody := map[string]any{
+		"model":       a.Model,
+		"temperature": 0.1,
+		"messages": []map[string]string{
+			{"role": "system", "content": systemPrompt},
+			{"role": "user", "content": mustJSON(context)},
+		},
+	}
+
+	data, err := json.Marshal(requestBody)
+	if err != nil {
+		return ConflictDecision{}, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, a.APIBaseURL+"/chat/completions", bytes.NewReader(data))
+	if err != nil {
+		return ConflictDecision{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.HTTPClient.Do(req)
+	if err != nil {
+		return ConflictDecision{}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ConflictDecision{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ConflictDecision{}, fmt.Errorf("llm request failed: %d %s", resp.StatusCode, string(respBody))
+	}
+
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return ConflictDecision{}, err
+	}
+	if len(parsed.Choices) == 0 {
+		return ConflictDecision{}, fmt.Errorf("llm response missing choices")
+	}
+
+	jsonPayload, err := extractJSONObject(parsed.Choices[0].Message.Content)
+	if err != nil {
+		return ConflictDecision{}, err
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(jsonPayload), &payload); err != nil {
+		return ConflictDecision{}, err
+	}
+
+	return normalizeConflictDecision(ConflictDecision{
+		ResolvedContent: stringValue(payload["resolved_content"]),
+		Summary:         stringValue(payload["summary"]),
+		Confidence:      floatValue(payload["confidence"]),
+		ShouldApply:     boolValue(payload["should_apply"]),
+	}), nil
+}
+
+func (a *Agent) SummarizeConflicts(context ConflictSummaryContext) (ConflictSummary, error) {
+	if a.APIKey == "" {
+		return heuristicConflictSummary(context), nil
+	}
+
+	systemPrompt := `You are helping a developer review git merge conflicts on a pull request.
+Return valid JSON with keys: summary, suggestions.
+summary should explain the likely cause of the conflict.
+suggestions should be a short list of concrete next steps for a human reviewer.`
+
+	requestBody := map[string]any{
+		"model":       a.Model,
+		"temperature": 0.1,
+		"messages": []map[string]string{
+			{"role": "system", "content": systemPrompt},
+			{"role": "user", "content": mustJSON(context)},
+		},
+	}
+
+	data, err := json.Marshal(requestBody)
+	if err != nil {
+		return ConflictSummary{}, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, a.APIBaseURL+"/chat/completions", bytes.NewReader(data))
+	if err != nil {
+		return ConflictSummary{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.HTTPClient.Do(req)
+	if err != nil {
+		return ConflictSummary{}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ConflictSummary{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ConflictSummary{}, fmt.Errorf("llm request failed: %d %s", resp.StatusCode, string(respBody))
+	}
+
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return ConflictSummary{}, err
+	}
+	if len(parsed.Choices) == 0 {
+		return ConflictSummary{}, fmt.Errorf("llm response missing choices")
+	}
+
+	jsonPayload, err := extractJSONObject(parsed.Choices[0].Message.Content)
+	if err != nil {
+		return ConflictSummary{}, err
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(jsonPayload), &payload); err != nil {
+		return ConflictSummary{}, err
+	}
+
+	return normalizeConflictSummary(ConflictSummary{
+		Summary:     stringValue(payload["summary"]),
+		Suggestions: stringSliceValue(payload["suggestions"]),
+	}), nil
+}
+
+func heuristicReview(context Context) Result {
+	topFiles := []string{}
+	for i, file := range context.ChangedFiles {
+		if i >= 3 {
+			break
+		}
+		topFiles = append(topFiles, file.Filename)
+	}
+
+	risk := inferRisk(context.ChangedFiles)
+	findings := []Finding{}
+
+	if context.CI.State != "" && context.CI.State != "success" {
+		findings = append(findings, Finding{
+			Severity:   "medium",
+			File:       "CI",
+			Title:      "当前 CI 结果未通过",
+			Detail:     fmt.Sprintf("检测到提交 %s 的状态为 %s。", shortSHA(context.HeadSHA), context.CI.State),
+			Suggestion: "先处理失败或等待 CI 完成，再继续人工审核。",
+		})
+	}
+
+	if !hasTestFiles(context.ChangedFiles) && len(context.ChangedFiles) > 0 {
+		severity := "low"
+		if risk != "low" {
+			severity = "medium"
+		}
+		findings = append(findings, Finding{
+			Severity:   severity,
+			File:       context.ChangedFiles[0].Filename,
+			Title:      "未发现明显测试变更",
+			Detail:     "本次变更中没有观察到直接相关的测试文件修改。",
+			Suggestion: "人工审核时重点确认是否需要补充单元测试或集成测试。",
+		})
+	}
+
+	summaryTarget := "少量文件"
+	if len(topFiles) > 0 {
+		summaryTarget = strings.Join(topFiles, "、")
+	}
+
+	return normalizeResult(Result{
+		Summary:     fmt.Sprintf("本 PR 主要涉及 %s 的修改，当前由本地启发式规则生成摘要，仍建议人工复核关键逻辑。", summaryTarget),
+		OverallRisk: risk,
+		Confidence:  0.42,
+		Findings:    findings,
+		Strengths: []string{
+			fmt.Sprintf("本次共改动 %d 个文件", len(context.ChangedFiles)),
+			fmt.Sprintf("CI 状态为 %s", fallback(context.CI.State, "unknown")),
+		},
+		TestSuggestions: []string{
+			"为核心路径补充至少一个成功场景测试",
+			"如果修改了错误处理逻辑，补充异常分支测试",
+		},
+		MergeReadiness: "needs_human_review",
+	})
+}
+
+func heuristicIntervention(context InterventionContext) InterventionDecision {
+	note := strings.ToLower(strings.TrimSpace(context.UserNote))
+
+	decision := InterventionDecision{
+		Action:  "comment_only",
+		Summary: "保留为人工介入处理。",
+		Comment: "已收到人工介入意见，当前保留给人工继续处理。",
+	}
+
+	switch {
+	case strings.Contains(note, "rerun"), strings.Contains(note, "re-run"), strings.Contains(note, "重跑"), strings.Contains(note, "重新审核"), strings.Contains(note, "再审一次"):
+		decision.Action = "re_review"
+		decision.Summary = "将重新执行自动审核。"
+		decision.Comment = "已收到人工意见，准备重新执行自动审核。"
+	case strings.Contains(note, "update branch"), strings.Contains(note, "sync branch"), strings.Contains(note, "rebase"), strings.Contains(note, "refresh branch"), strings.Contains(note, "更新分支"), strings.Contains(note, "同步分支"), strings.Contains(note, "解决冲突"):
+		decision.Action = "update_branch"
+		decision.Summary = "将尝试更新 PR 分支。"
+		decision.Comment = "已收到人工意见，系统将尝试更新 PR 分支并刷新冲突状态。"
+	case strings.Contains(note, "merge"), strings.Contains(note, "approve and merge"), strings.Contains(note, "合并"), strings.Contains(note, "可以合并"), strings.Contains(note, "直接发版"):
+		decision.Action = "merge"
+		decision.Summary = "将尝试按人工意见直接合并。"
+		decision.Comment = "已收到人工意见，系统将尝试直接合并该 PR。"
+	}
+
+	return normalizeInterventionDecision(decision)
+}
+
+func heuristicConflictSummary(context ConflictSummaryContext) ConflictSummary {
+	suggestions := []string{
+		"先确认冲突文件中的业务预期，以 base 分支当前行为作为参照。",
+		"逐个核对冲突块，优先保留最新的公共修复，再补回本 PR 的业务改动。",
+		"解决后重新运行相关测试与 CI。",
+	}
+	return normalizeConflictSummary(ConflictSummary{
+		Summary:     fmt.Sprintf("检测到 %d 个冲突文件，建议人工逐个确认合并结果。", len(context.Conflicts)),
+		Suggestions: suggestions,
+	})
+}
+
+func normalizeResult(result Result) Result {
+	if result.Summary == "" {
+		result.Summary = "未能从输出中提取稳定摘要，建议人工查看本次变更。"
+	}
+
+	switch result.OverallRisk {
+	case "low", "medium", "high":
+	default:
+		result.OverallRisk = "medium"
+	}
+
+	if result.Confidence < 0 {
+		result.Confidence = 0
+	}
+	if result.Confidence > 1 {
+		result.Confidence = 1
+	}
+
+	switch result.MergeReadiness {
+	case "needs_human_review", "ready_for_manual_approval":
+	default:
+		result.MergeReadiness = "needs_human_review"
+	}
+
+	if result.Findings == nil {
+		result.Findings = []Finding{}
+	} else {
+		filteredFindings := make([]Finding, 0, len(result.Findings))
+		for _, finding := range result.Findings {
+			if strings.TrimSpace(finding.File) == "" &&
+				strings.TrimSpace(finding.Title) == "" &&
+				strings.TrimSpace(finding.Detail) == "" &&
+				strings.TrimSpace(finding.Suggestion) == "" {
+				continue
+			}
+			filteredFindings = append(filteredFindings, finding)
+		}
+		result.Findings = filteredFindings
+	}
+	if result.Strengths == nil {
+		result.Strengths = []string{}
+	}
+	if result.TestSuggestions == nil {
+		result.TestSuggestions = []string{}
+	}
+
+	// Some OpenAI-compatible providers omit confidence or return an unusable zero.
+	// For clearly low-risk, clean PRs we promote that missing value to a conservative default
+	// so downstream trust logic can still auto-handle obvious cases like docs-only changes.
+	if result.Confidence == 0 && result.OverallRisk == "low" && len(result.Findings) == 0 && result.MergeReadiness == "ready_for_manual_approval" {
+		result.Confidence = 0.82
+	}
+
+	return result
+}
+
+func normalizeInterventionDecision(decision InterventionDecision) InterventionDecision {
+	switch decision.Action {
+	case "merge", "update_branch", "comment_only", "re_review":
+	default:
+		decision.Action = "comment_only"
+	}
+
+	if decision.Summary == "" {
+		decision.Summary = "已记录人工介入意见。"
+	}
+	if decision.Comment == "" {
+		decision.Comment = decision.Summary
+	}
+
+	return decision
+}
+
+func normalizeConflictDecision(decision ConflictDecision) ConflictDecision {
+	if decision.Confidence < 0 {
+		decision.Confidence = 0
+	}
+	if decision.Confidence > 1 {
+		decision.Confidence = 1
+	}
+	if decision.Summary == "" {
+		decision.Summary = "未提供冲突解决说明。"
+	}
+	if decision.ResolvedContent == "" {
+		decision.ShouldApply = false
+	}
+	return decision
+}
+
+func normalizeConflictSummary(summary ConflictSummary) ConflictSummary {
+	if summary.Summary == "" {
+		summary.Summary = "检测到冲突，建议人工复核。"
+	}
+	if summary.Suggestions == nil {
+		summary.Suggestions = []string{}
+	}
+	return summary
+}
+
+func resultFromMap(payload map[string]any) Result {
+	result := Result{
+		Summary:         stringValue(payload["summary"]),
+		OverallRisk:     stringValue(payload["overall_risk"]),
+		Confidence:      floatValue(payload["confidence"]),
+		Strengths:       stringSliceValue(payload["strengths"]),
+		TestSuggestions: stringSliceValue(payload["test_suggestions"]),
+		MergeReadiness:  stringValue(payload["merge_readiness"]),
+		Findings:        findingsValue(payload["findings"]),
+	}
+	return result
+}
+
+func findingsValue(value any) []Finding {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+
+	findings := make([]Finding, 0, len(items))
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		findings = append(findings, Finding{
+			Severity:   stringValue(entry["severity"]),
+			File:       stringValue(entry["file"]),
+			Title:      stringValue(entry["title"]),
+			Detail:     stringValue(entry["detail"]),
+			Suggestion: stringValue(entry["suggestion"]),
+		})
+	}
+	return findings
+}
+
+func stringSliceValue(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		text := stringValue(item)
+		if text != "" {
+			result = append(result, text)
+		}
+	}
+	return result
+}
+
+func stringValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	case float64:
+		return strings.TrimSpace(strconv.FormatFloat(typed, 'f', -1, 64))
+	case int:
+		return strconv.Itoa(typed)
+	default:
+		return ""
+	}
+}
+
+func floatValue(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		if err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func boolValue(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		normalized := strings.ToLower(strings.TrimSpace(typed))
+		return normalized == "true" || normalized == "yes" || normalized == "1"
+	case float64:
+		return typed != 0
+	case int:
+		return typed != 0
+	default:
+		return false
+	}
+}
+
+func inferRisk(files []ChangedFile) string {
+	for _, file := range files {
+		name := file.Filename
+		if strings.HasPrefix(name, "infra/") || strings.HasPrefix(name, "migrations/") || strings.HasPrefix(name, "auth/") || strings.HasSuffix(name, ".sql") {
+			return "high"
+		}
+		if len(file.Patch) > 2500 {
+			return "medium"
+		}
+	}
+	if len(files) > 10 {
+		return "medium"
+	}
+	return "low"
+}
+
+func hasTestFiles(files []ChangedFile) bool {
+	for _, file := range files {
+		if strings.Contains(file.Filename, ".test.") || strings.Contains(file.Filename, ".spec.") {
+			return true
+		}
+	}
+	return false
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
+func fallback(value, defaultValue string) string {
+	if value == "" {
+		return defaultValue
+	}
+	return value
+}
+
+func mustJSON(value any) string {
+	data, _ := json.MarshalIndent(value, "", "  ")
+	return string(data)
+}
+
+func extractJSONObject(text string) (string, error) {
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start < 0 || end <= start {
+		return "", fmt.Errorf("model output did not contain json")
+	}
+	return text[start : end+1], nil
+}

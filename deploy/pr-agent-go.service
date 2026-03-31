@@ -1,0 +1,15 @@
+[Unit]
+Description=PR Agent Go webhook service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/www/wwwroot/go-server
+EnvironmentFile=/www/wwwroot/go-server/.env
+ExecStart=/www/wwwroot/go-server/pr-agent-go
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

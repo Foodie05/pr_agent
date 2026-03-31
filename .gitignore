@@ -1,0 +1,5 @@
+.env
+.gocache/
+server
+dist/
+data/*.json

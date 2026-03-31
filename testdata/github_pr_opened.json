@@ -1,0 +1,12 @@
+{
+  "action": "opened",
+  "repository": {
+    "full_name": "acme/api"
+  },
+  "pull_request": {
+    "number": 7,
+    "head": {
+      "sha": "abc1234567890"
+    }
+  }
+}
