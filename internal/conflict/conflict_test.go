@@ -22,7 +22,7 @@ func TestExtractConflictBlocksParsesCurrentAndIncomingParts(t *testing.T) {
 func TestResolveRemainingBlocksPreferCurrent(t *testing.T) {
 	content := "before\n<<<<<<< HEAD\nkeep this\n=======\ndrop this\n>>>>>>> main\nafter\n"
 	resolved := resolveRemainingBlocksPreferCurrent(content)
-	if strings.Contains(resolved, "<<<<<<<") || strings.Contains(resolved, ">>>>>>>") {
+	if hasConflictBlocks(resolved) {
 		t.Fatalf("expected markers to be removed, got %q", resolved)
 	}
 	if !strings.Contains(resolved, "keep this") {
@@ -30,5 +30,12 @@ func TestResolveRemainingBlocksPreferCurrent(t *testing.T) {
 	}
 	if strings.Contains(resolved, "drop this") {
 		t.Fatalf("expected incoming side to be removed, got %q", resolved)
+	}
+}
+
+func TestUnresolvedConflictBlockCountIgnoresStringLiterals(t *testing.T) {
+	content := "func demo() string {\n\treturn \"<<<<<<< not a real conflict marker\"\n}\n"
+	if unresolvedConflictBlockCount(content) != 0 {
+		t.Fatalf("expected string literal marker text to be ignored, got %d", unresolvedConflictBlockCount(content))
 	}
 }

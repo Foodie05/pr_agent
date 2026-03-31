@@ -331,7 +331,7 @@ func (r *GitResolver) resolveConflictFile(pull github.Pull, reviewResult review.
 	if strings.TrimSpace(decision.ResolvedContent) == "" {
 		return "", "", 0, fmt.Errorf("empty resolution for %s", file.Path)
 	}
-	if strings.Contains(decision.ResolvedContent, "<<<<<<<") {
+	if hasConflictBlocks(decision.ResolvedContent) {
 		return "", "", 0, fmt.Errorf("resolution still contains conflict markers for %s", file.Path)
 	}
 	if mode != ModeForceResolve && (!decision.ShouldApply || decision.Confidence < 0.8) {
@@ -377,7 +377,7 @@ func (r *GitResolver) resolveConflictFileByBlocks(pull github.Pull, reviewResult
 			if strings.TrimSpace(decision.ResolvedBlock) == "" {
 				return "", "", 0, fmt.Errorf("empty block resolution for %s block %d", file.Path, index+1)
 			}
-			if strings.Contains(decision.ResolvedBlock, "<<<<<<<") {
+			if hasConflictBlocks(decision.ResolvedBlock) {
 				return "", "", 0, fmt.Errorf("block resolution still contains conflict markers for %s block %d", file.Path, index+1)
 			}
 			if mode != ModeForceResolve && (!decision.ShouldApply || decision.Confidence < 0.8) {
@@ -396,12 +396,12 @@ func (r *GitResolver) resolveConflictFileByBlocks(pull github.Pull, reviewResult
 		}
 	}
 
-	if remaining := countConflictMarkers(resolved); remaining > 0 {
+	if remaining := unresolvedConflictBlockCount(resolved); remaining > 0 {
 		if mode == ModeForceResolve {
 			log.Printf("conflict file fallback repo=%s pr=%d path=%s remaining_blocks=%d strategy=prefer_current", pull.Base.Repo.FullName, pull.Number, file.Path, remaining)
 			resolved = resolveRemainingBlocksPreferCurrent(resolved)
 		}
-		remaining = countConflictMarkers(resolved)
+		remaining = unresolvedConflictBlockCount(resolved)
 		if remaining == 0 {
 			return resolved, strings.Join(summaries, " | "), minConfidence, nil
 		}
@@ -412,11 +412,15 @@ func (r *GitResolver) resolveConflictFileByBlocks(pull github.Pull, reviewResult
 }
 
 func shouldResolveByBlocks(file FileConflict) bool {
-	return len(file.ConflictMarkers) > 16000 || countConflictMarkers(file.ConflictMarkers) > 1
+	return len(file.ConflictMarkers) > 16000 || unresolvedConflictBlockCount(file.ConflictMarkers) > 1
 }
 
-func countConflictMarkers(value string) int {
-	return strings.Count(value, "<<<<<<<")
+func hasConflictBlocks(value string) bool {
+	return unresolvedConflictBlockCount(value) > 0
+}
+
+func unresolvedConflictBlockCount(value string) int {
+	return len(extractConflictBlocks(value))
 }
 
 func extractConflictBlocks(content string) []conflictBlock {
