@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist/linux-x64"
-REMOTE_HOST="cruty.cn"
+REMOTE_HOST="${REMOTE_HOST:-${1:-example-host}}"
 REMOTE_DIR="/www/wwwroot/go-server"
 REMOTE_SERVICE_FILE="/etc/systemd/system/pr-agent-go.service"
 REMOTE_SERVICE_NAME="pr-agent-go"

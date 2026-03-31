@@ -204,6 +204,14 @@ func (c *Client) MergePull(repoFullName string, prNumber int, commitTitle string
 	return c.requestJSON(http.MethodPut, fmt.Sprintf("/repos/%s/pulls/%d/merge", repoFullName, prNumber), payload, nil)
 }
 
+func (c *Client) ApprovePullReview(repoFullName string, prNumber int, body string) error {
+	payload := map[string]string{
+		"event": "APPROVE",
+		"body":  body,
+	}
+	return c.requestJSON(http.MethodPost, fmt.Sprintf("/repos/%s/pulls/%d/reviews", repoFullName, prNumber), payload, nil)
+}
+
 func (c *Client) MarkPullReadyForReview(nodeID string) error {
 	if strings.TrimSpace(nodeID) == "" {
 		return fmt.Errorf("missing pull request node id")

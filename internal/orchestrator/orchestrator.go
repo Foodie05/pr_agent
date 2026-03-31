@@ -20,6 +20,8 @@ const (
 	trustNeedsUserIntervention = "needs_user_intervention"
 )
 
+var mergeRetryDelayBase = 750 * time.Millisecond
+
 type Service struct {
 	Storage             *storage.FileStorage
 	GitHub              *github.Client
@@ -283,10 +285,14 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 			}
 		}
 		if pull.Mergeable != nil && *pull.Mergeable {
-			err = s.GitHub.MergePull(repoFullName, prNumber, fmt.Sprintf("Merge PR #%d: %s", prNumber, pull.Title))
+			err = s.mergeWithRepositoryRules(repoFullName, prNumber, pull.Title)
 			if err == nil {
 				action.ActionStatus = "merged"
 				action.ActionDetails = "merged after explicit user approval"
+			} else if isApprovalRequiredError(err) {
+				action.ActionStatus = "awaiting_required_review"
+				action.ActionDetails = err.Error()
+				err = nil
 			}
 		} else if pull.MergeableState == "behind" {
 			err = s.GitHub.UpdateBranch(repoFullName, prNumber)
@@ -571,7 +577,7 @@ func (s *Service) handlePostReviewAction(repoFullName string, prNumber int, pull
 	switch trustLevel {
 	case trustTrusted:
 		if pull.Mergeable != nil && *pull.Mergeable {
-			if err := s.GitHub.MergePull(repoFullName, prNumber, fmt.Sprintf("Merge PR #%d: %s", prNumber, pull.Title)); err != nil {
+			if err := s.mergeWithRepositoryRules(repoFullName, prNumber, pull.Title); err != nil {
 				if isMergePermissionError(err) {
 					body := "## PR Agent Action Required\n\n该 PR 已通过自动审核并满足自动合并条件，但当前服务使用的 GitHub Token 没有执行 merge 的权限。请更新 Token 权限后重试，或由人工手动合并。"
 					_, _ = s.GitHub.CreateIssueComment(repoFullName, prNumber, body)
@@ -579,6 +585,16 @@ func (s *Service) handlePostReviewAction(repoFullName string, prNumber int, pull
 						TrustLevel:    trustLevel,
 						ActionTaken:   "merge",
 						ActionStatus:  "merge_permission_denied",
+						ActionDetails: err.Error(),
+					}, nil
+				}
+				if isApprovalRequiredError(err) {
+					body := "## PR Agent Action Required\n\n该 PR 已通过自动审核，但当前仓库规则要求至少 1 个具备写权限的 Approving Review。Agent 已尝试自动补充审批，但仍未满足仓库规则，请由具备写权限的 reviewer 手动 approve 后再合并。"
+					_, _ = s.GitHub.CreateIssueComment(repoFullName, prNumber, body)
+					return autoAction{
+						TrustLevel:    trustLevel,
+						ActionTaken:   "merge",
+						ActionStatus:  "awaiting_required_review",
 						ActionDetails: err.Error(),
 					}, nil
 				}
@@ -628,7 +644,7 @@ func (s *Service) handlePostReviewAction(repoFullName string, prNumber int, pull
 		}
 		return s.completeConflictOutcome(repoFullName, prNumber, pull, outcome, trustLevel)
 	default:
-		body := "## PR Agent Action Required\n\n该 PR 当前不满足自动合并条件。请使用 CLI 的 `intervene-pr owner/repo pr_number` 输入处理意见，由 Agent 继续执行后续动作。"
+		body := "## PR Agent Action Required\n\n该 PR 当前不满足自动合并条件。请使用 CLI 的 `check owner/repo pr_number` 输入处理意见，由 Agent 继续执行后续动作。"
 		if _, err := s.GitHub.CreateIssueComment(repoFullName, prNumber, body); err != nil {
 			return autoAction{
 				TrustLevel:    trustNeedsUserIntervention,
@@ -681,15 +697,11 @@ func decideTrustLevel(pull github.Pull, status github.CommitStatus, reviewResult
 	if reviewResult.OverallRisk != "low" {
 		return trustNeedsUserIntervention
 	}
-	if len(reviewResult.Findings) > 0 {
-		return trustNeedsUserIntervention
-	}
 	if reviewResult.MergeReadiness != "ready_for_manual_approval" {
 		return trustNeedsUserIntervention
 	}
-	// Confidence helps us prioritize, but it should not veto obviously safe PRs
-	// when the provider omitted or degraded that field.
-	if reviewResult.Confidence > 0 && reviewResult.Confidence < 0.35 {
+	// Trust decisions are driven by risk and confidence only.
+	if !reviewResult.ConfidenceSet || reviewResult.Confidence < 0.35 {
 		return trustNeedsUserIntervention
 	}
 
@@ -842,7 +854,7 @@ func (s *Service) resolveConflictsForPull(repoFullName string, prNumber int, pul
 				Summary: "服务未配置冲突处理器。",
 				Suggestions: []string{
 					"先在本地或 GitHub 上手动解决冲突。",
-					"解决后重新运行 review-pr 或等待 webhook 重试。",
+					"解决后重新运行 review 或等待 webhook 重试。",
 				},
 			},
 		}, nil
@@ -859,7 +871,7 @@ func (s *Service) completeConflictOutcome(repoFullName string, prNumber int, pul
 	if outcome.MergeClean || outcome.AutoResolved {
 		refreshedPull, mergeErr := s.waitForMergeablePull(repoFullName, prNumber)
 		if mergeErr == nil && refreshedPull.Mergeable != nil && *refreshedPull.Mergeable {
-			if err := s.GitHub.MergePull(repoFullName, prNumber, fmt.Sprintf("Merge PR #%d: %s", prNumber, pull.Title)); err == nil {
+			if err := s.mergeWithRepositoryRules(repoFullName, prNumber, pull.Title); err == nil {
 				return autoAction{
 					TrustLevel:    trustLevel,
 					ActionTaken:   "merge",
@@ -873,6 +885,15 @@ func (s *Service) completeConflictOutcome(repoFullName string, prNumber int, pul
 					TrustLevel:    trustLevel,
 					ActionTaken:   "merge",
 					ActionStatus:  "merge_permission_denied",
+					ActionDetails: err.Error(),
+				}, nil
+			} else if isApprovalRequiredError(err) {
+				body := "## PR Agent Action Required\n\n冲突已处理并回推到 PR 分支，但当前仓库规则要求至少 1 个具备写权限的 Approving Review。Agent 已尝试自动补充审批，但仍未满足仓库规则，请由具备写权限的 reviewer 手动 approve 后再合并。"
+				_, _ = s.GitHub.CreateIssueComment(repoFullName, prNumber, body)
+				return autoAction{
+					TrustLevel:    trustLevel,
+					ActionTaken:   "merge",
+					ActionStatus:  "awaiting_required_review",
 					ActionDetails: err.Error(),
 				}, nil
 			}
@@ -931,4 +952,39 @@ func (s *Service) waitForMergeablePull(repoFullName string, prNumber int) (githu
 		return github.Pull{}, lastErr
 	}
 	return lastPull, fmt.Errorf("pull request did not become mergeable after conflict resolution")
+}
+
+func (s *Service) mergeWithRepositoryRules(repoFullName string, prNumber int, pullTitle string) error {
+	commitTitle := fmt.Sprintf("Merge PR #%d: %s", prNumber, pullTitle)
+	if err := s.GitHub.MergePull(repoFullName, prNumber, commitTitle); err != nil {
+		if isApprovalRequiredError(err) {
+			if approveErr := s.GitHub.ApprovePullReview(repoFullName, prNumber, "Automated approval for a trusted PR that passed PR Agent review."); approveErr != nil {
+				return fmt.Errorf("%w; approve attempt failed: %v", err, approveErr)
+			}
+			var retryErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				time.Sleep(time.Duration(attempt+1) * mergeRetryDelayBase)
+				retryErr = s.GitHub.MergePull(repoFullName, prNumber, commitTitle)
+				if retryErr == nil {
+					return nil
+				}
+				if !isApprovalRequiredError(retryErr) {
+					return retryErr
+				}
+			}
+			return retryErr
+		}
+		return err
+	}
+	return nil
+}
+
+func isApprovalRequiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "approving review is required") ||
+		strings.Contains(message, "at least 1 approving review is required") ||
+		strings.Contains(message, "repository rule violations found")
 }

@@ -1,6 +1,6 @@
 .env
 .gocache/
-server
+/server
 dist/
 data/*.json
 .DS_Store

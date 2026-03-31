@@ -1,10 +1,12 @@
 package status
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"strings"
 	"time"
 
@@ -57,12 +59,73 @@ type Overview struct {
 	RecentRuns    []storage.ReviewRun  `json:"recentRuns"`
 }
 
-func RunChecks(cfg config.Config) []Check {
-	return []Check{
-		checkServiceConfig(cfg),
-		checkGitHub(cfg),
-		checkModel(cfg),
+type CheckCache struct {
+	cfg         config.Config
+	mu          sync.RWMutex
+	checks      []Check
+	refreshedAt time.Time
+}
+
+func NewCheckCache(cfg config.Config) *CheckCache {
+	return &CheckCache{
+		cfg: cfg,
+		checks: []Check{
+			checkServiceConfig(cfg),
+			{Name: "github", OK: false, Message: "status check pending"},
+			{Name: "model", OK: false, Message: "status check pending"},
+		},
 	}
+}
+
+func (c *CheckCache) Start(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	c.refresh()
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.refresh()
+			}
+		}
+	}()
+}
+
+func (c *CheckCache) Snapshot() []Check {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	out := make([]Check, len(c.checks))
+	copy(out, c.checks)
+	return out
+}
+
+func RunChecks(cfg config.Config) []Check {
+	results := make([]Check, 3)
+	results[0] = checkServiceConfig(cfg)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		results[1] = checkGitHub(cfg)
+	}()
+
+	go func() {
+		defer wg.Done()
+		results[2] = checkModel(cfg)
+	}()
+
+	wg.Wait()
+	return results
 }
 
 func BuildOverview(cfg config.Config, store *storage.FileStorage, queue processor.Snapshot, checks []Check) (Overview, error) {
@@ -135,7 +198,8 @@ func BuildOverview(cfg config.Config, store *storage.FileStorage, queue processo
 }
 
 func FetchRemoteOverview(port int) (Overview, error) {
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/internal/status", port))
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/internal/status", port))
 	if err != nil {
 		return Overview{}, err
 	}
@@ -153,6 +217,14 @@ func FetchRemoteOverview(port int) (Overview, error) {
 	return overview, nil
 }
 
+func (c *CheckCache) refresh() {
+	checks := RunChecks(c.cfg)
+	c.mu.Lock()
+	c.checks = checks
+	c.refreshedAt = time.Now()
+	c.mu.Unlock()
+}
+
 func checkServiceConfig(cfg config.Config) Check {
 	if cfg.Port <= 0 || cfg.Server.WorkerCount <= 0 || cfg.Server.QueueSize <= 0 {
 		return Check{Name: "service_config", OK: false, Message: "invalid port or worker/queue configuration"}
@@ -162,6 +234,7 @@ func checkServiceConfig(cfg config.Config) Check {
 
 func checkGitHub(cfg config.Config) Check {
 	client := github.New(cfg.GitHub.APIBaseURL, cfg.GitHub.Token, cfg.GitHub.ReviewCommentMarker)
+	client.HTTPClient = &http.Client{Timeout: 2 * time.Second}
 	if err := client.CheckConnection(); err != nil {
 		return Check{Name: "github", OK: false, Message: err.Error()}
 	}
@@ -170,6 +243,7 @@ func checkGitHub(cfg config.Config) Check {
 
 func checkModel(cfg config.Config) Check {
 	agent := review.NewAgent(cfg.LLM.APIBaseURL, cfg.LLM.APIKey, cfg.LLM.Model)
+	agent.HTTPClient = &http.Client{Timeout: 2 * time.Second}
 	if err := agent.CheckConnection(); err != nil {
 		return Check{Name: "model", OK: false, Message: err.Error()}
 	}
