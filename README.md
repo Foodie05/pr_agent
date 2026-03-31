@@ -150,6 +150,7 @@ The current trust decision is intentionally simple:
 - draft PRs are never auto-merged
 - branch protection and repository rules still take precedence
 - findings are rendered for humans, but they do not block automatic handling by themselves
+- if a provider does not return a usable confidence value, comments may show `confidence=unavailable`
 
 当前信任判定规则刻意保持简单：
 
@@ -157,6 +158,7 @@ The current trust decision is intentionally simple:
 - Draft PR 不会自动合并
 - GitHub 分支保护和仓库规则始终优先
 - `findings` 主要用于给人看，不再单独阻断自动处理
+- 如果模型供应商没有返回可用的 `confidence`，评论中会显示 `confidence=unavailable`
 
 ## GitHub Token Permissions | GitHub Token 权限
 

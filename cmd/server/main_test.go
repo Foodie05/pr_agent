@@ -3,7 +3,7 @@ package main
 import "testing"
 
 func TestParseRepoAndPRFromGitHubURL(t *testing.T) {
-	repo, number, err := parseRepoAndPR([]string{"review-pr", "https://github.com/Foodie05/psyche_project/pull/1"}, "review-pr")
+	repo, number, err := parseRepoAndPR([]string{"review", "https://github.com/Foodie05/psyche_project/pull/1"}, "review")
 	if err != nil {
 		t.Fatalf("parseRepoAndPR returned error: %v", err)
 	}
