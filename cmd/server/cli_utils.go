@@ -32,6 +32,8 @@ func printUsage() {
 	fmt.Println("  pr-agent-go review https://github.com/owner/repo/pull/123 [--json]")
 	fmt.Println("  pr-agent-go check owner/repo pr_number [--note \"...\" | stdin] [--json]")
 	fmt.Println("  pr-agent-go check https://github.com/owner/repo/pull/123 [--note \"...\" | stdin] [--json]")
+	fmt.Println("  pr-agent-go recheck owner/repo pr_number [--json]")
+	fmt.Println("  pr-agent-go recheck https://github.com/owner/repo/pull/123 [--json]")
 	fmt.Println("  pr-agent-go add owner/repo [--json]")
 	fmt.Println("  pr-agent-go add https://github.com/owner/repo [--json]")
 }

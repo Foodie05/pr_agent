@@ -118,6 +118,17 @@ See [.env.example](.env.example) for the full template.
 
 `check` 用于人工继续处理已经进入待处理状态的 PR，比如直接合并、更新分支、要求重新审核或补充评论。
 
+### Retry a cached conflict workflow | 重试已缓存的冲突处理
+
+```bash
+./pr-agent-go recheck owner/repo 123
+./pr-agent-go recheck https://github.com/owner/repo/pull/123
+```
+
+If conflict handling previously failed because cloning or fetching timed out, `recheck` resumes from the cached conflict step instead of rerunning the full review flow.
+
+如果之前冲突处理因为 `git clone` 或 `git fetch` 超时失败，`recheck` 会从已缓存的冲突步骤继续，而不是重新跑完整审核。
+
 ### Add or update a repository webhook | 添加或更新仓库 webhook
 
 ```bash

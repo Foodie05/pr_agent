@@ -33,6 +33,18 @@ type Outcome struct {
 	ResolutionSummaries []string
 }
 
+type RetryableError struct {
+	Step    string
+	Message string
+}
+
+func (e RetryableError) Error() string {
+	if strings.TrimSpace(e.Message) == "" {
+		return fmt.Sprintf("retryable conflict step failure at %s", e.Step)
+	}
+	return fmt.Sprintf("%s: %s", e.Step, e.Message)
+}
+
 type FileConflict struct {
 	Path            string
 	BaseContent     string
@@ -103,7 +115,7 @@ func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	if _, err := r.Runner.Run(ctx, "", "git", "clone", "--branch", pull.Head.Ref, "--single-branch", withToken(pull.Head.Repo.CloneURL, r.Token), repoDir); err != nil {
+	if _, err := r.runGitStepWithRetry(ctx, "", "clone", "git", "clone", "--branch", pull.Head.Ref, "--single-branch", withToken(pull.Head.Repo.CloneURL, r.Token), repoDir); err != nil {
 		return Outcome{}, err
 	}
 	if _, err := r.Runner.Run(ctx, repoDir, "git", "config", "user.name", fallback(r.UserName, "pr-agent-go")); err != nil {
@@ -116,7 +128,7 @@ func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode
 	if _, err := r.Runner.Run(ctx, repoDir, "git", "remote", "add", "upstream", withToken(pull.Base.Repo.CloneURL, r.Token)); err != nil && !strings.Contains(err.Error(), "already exists") {
 		return Outcome{}, err
 	}
-	if _, err := r.Runner.Run(ctx, repoDir, "git", "fetch", "upstream", pull.Base.Ref); err != nil {
+	if _, err := r.runGitStepWithRetry(ctx, repoDir, "fetch", "git", "fetch", "upstream", pull.Base.Ref); err != nil {
 		return Outcome{}, err
 	}
 
@@ -335,4 +347,35 @@ func fallback(value, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+func (r *GitResolver) runGitStepWithRetry(ctx context.Context, dir string, step string, name string, args ...string) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		output, err := r.Runner.Run(ctx, dir, name, args...)
+		if err == nil {
+			return output, nil
+		}
+		lastErr = err
+		if !isRetryableGitError(err) || attempt == 2 {
+			return "", RetryableError{Step: step, Message: err.Error()}
+		}
+		time.Sleep(time.Duration(attempt+1) * 1200 * time.Millisecond)
+	}
+	return "", RetryableError{Step: step, Message: lastErr.Error()}
+}
+
+func isRetryableGitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "timed out") ||
+		strings.Contains(message, "timeout") ||
+		strings.Contains(message, "failed to connect") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "temporary failure") ||
+		strings.Contains(message, "network is unreachable") ||
+		strings.Contains(message, "could not resolve host")
 }

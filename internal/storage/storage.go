@@ -51,10 +51,25 @@ type DailySummary struct {
 	FailedEvents int            `json:"failedEvents"`
 }
 
+type ConflictRetry struct {
+	RepoFullName     string `json:"repoFullName"`
+	PRNumber         int    `json:"prNumber"`
+	HeadSHA          string `json:"headSha"`
+	TrustLevel       string `json:"trustLevel"`
+	AllowAutoResolve bool   `json:"allowAutoResolve"`
+	Pull             any    `json:"pull"`
+	ReviewResult     any    `json:"reviewResult"`
+	FailedStep       string `json:"failedStep"`
+	ErrorMessage     string `json:"errorMessage"`
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
+}
+
 type FileStorage struct {
 	dataDir       string
 	eventLogPath  string
 	reviewRunPath string
+	conflictPath  string
 	mu            sync.Mutex
 }
 
@@ -93,6 +108,7 @@ func New(dataDir string) (*FileStorage, error) {
 		dataDir:       dataDir,
 		eventLogPath:  filepath.Join(dataDir, "event-logs.json"),
 		reviewRunPath: filepath.Join(dataDir, "review-runs.json"),
+		conflictPath:  filepath.Join(dataDir, "conflict-retries.json"),
 	}, nil
 }
 
@@ -189,6 +205,65 @@ func (s *FileStorage) FindLatestReviewRun(repoFullName string, prNumber int) (Re
 		}
 	}
 	return latest, found, nil
+}
+
+func (s *FileStorage) SaveConflictRetry(entry ConflictRetry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var entries []ConflictRetry
+	if err := readJSONFile(s.conflictPath, &entries); err != nil {
+		return err
+	}
+
+	updated := false
+	for i := range entries {
+		if entries[i].RepoFullName == entry.RepoFullName && entries[i].PRNumber == entry.PRNumber {
+			entries[i] = entry
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		entries = append(entries, entry)
+	}
+	return writeJSONFile(s.conflictPath, entries)
+}
+
+func (s *FileStorage) FindConflictRetry(repoFullName string, prNumber int) (ConflictRetry, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var entries []ConflictRetry
+	if err := readJSONFile(s.conflictPath, &entries); err != nil {
+		return ConflictRetry{}, false, err
+	}
+
+	for _, entry := range entries {
+		if entry.RepoFullName == repoFullName && entry.PRNumber == prNumber {
+			return entry, true, nil
+		}
+	}
+	return ConflictRetry{}, false, nil
+}
+
+func (s *FileStorage) DeleteConflictRetry(repoFullName string, prNumber int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var entries []ConflictRetry
+	if err := readJSONFile(s.conflictPath, &entries); err != nil {
+		return err
+	}
+
+	filtered := entries[:0]
+	for _, entry := range entries {
+		if entry.RepoFullName == repoFullName && entry.PRNumber == prNumber {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return writeJSONFile(s.conflictPath, filtered)
 }
 
 func (s *FileStorage) DailySummary(now time.Time) (DailySummary, error) {

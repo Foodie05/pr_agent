@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"pr-agent-go/internal/conflict"
 	"pr-agent-go/internal/github"
 	"pr-agent-go/internal/review"
 	"pr-agent-go/internal/storage"
@@ -339,6 +340,150 @@ func TestMergeWithRepositoryRulesRetriesAfterApprove(t *testing.T) {
 	}
 	if mergeAttempts != 3 {
 		t.Fatalf("expected 3 merge attempts, got %d", mergeAttempts)
+	}
+}
+
+type fakeConflictResolver struct {
+	outcome conflict.Outcome
+	err     error
+}
+
+func (f fakeConflictResolver) Resolve(pull github.Pull, reviewResult review.Result, mode string) (conflict.Outcome, error) {
+	return f.outcome, f.err
+}
+
+func TestResolveConflictsCachesRetryableFailure(t *testing.T) {
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("init storage: %v", err)
+	}
+
+	commentBodies := []string{}
+	httpClient := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/issues/10/comments" {
+			body, _ := io.ReadAll(r.Body)
+			var payload struct{ Body string `json:"body"` }
+			_ = json.Unmarshal(body, &payload)
+			commentBodies = append(commentBodies, payload.Body)
+			return jsonResponse(t, map[string]any{"id": 10, "body": payload.Body})
+		}
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		return nil, nil
+	})
+
+	service := &Service{
+		Storage:             store,
+		GitHub:              githubClientWithHTTPClient("https://api.github.test", "test-token", "<!-- marker -->", httpClient),
+		ConflictResolver:    fakeConflictResolver{err: conflict.RetryableError{Step: "clone", Message: "timeout"}},
+		ReviewCommentMarker: "<!-- marker -->",
+	}
+
+	pull := github.Pull{}
+	pull.Number = 10
+	pull.Title = "conflict"
+	pull.Head.SHA = "abc"
+	pull.Base.Repo.FullName = "acme/api"
+	result := review.Result{OverallRisk: "low", Confidence: 0.9, ConfidenceSet: true, MergeReadiness: "ready_for_manual_approval"}
+
+	_, err = service.resolveConflictsForPull("acme/api", 10, pull, result, true)
+	if err == nil {
+		t.Fatalf("expected retryable error")
+	}
+
+	entry, found, findErr := store.FindConflictRetry("acme/api", 10)
+	if findErr != nil {
+		t.Fatalf("find cached retry: %v", findErr)
+	}
+	if !found || entry.FailedStep != "clone" {
+		t.Fatalf("expected cached clone retry entry, got %+v found=%v", entry, found)
+	}
+	if len(commentBodies) != 1 || !strings.Contains(commentBodies[0], "recheck owner/repo pr_number") {
+		t.Fatalf("expected retry guidance comment, got %v", commentBodies)
+	}
+}
+
+func TestRecheckConflictUsesCachedEntry(t *testing.T) {
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("init storage: %v", err)
+	}
+
+	pull := github.Pull{}
+	pull.Number = 11
+	pull.Title = "conflict"
+	pull.Head.SHA = "abc11"
+	pull.Base.Repo.FullName = "acme/api"
+	result := review.Result{OverallRisk: "low", Confidence: 0.9, ConfidenceSet: true, MergeReadiness: "ready_for_manual_approval"}
+	if err := store.SaveConflictRetry(storage.ConflictRetry{
+		RepoFullName:     "acme/api",
+		PRNumber:         11,
+		HeadSHA:          "abc11",
+		TrustLevel:       trustTrustedConflict,
+		AllowAutoResolve: true,
+		Pull:             pull,
+		ReviewResult:     result,
+		FailedStep:       "clone",
+		ErrorMessage:     "timeout",
+		CreatedAt:        "2026-03-31T00:00:00Z",
+		UpdatedAt:        "2026-03-31T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("seed retry entry: %v", err)
+	}
+
+	commentBodies := []string{}
+	httpClient := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/api/pulls/11":
+			return jsonResponse(t, map[string]any{
+				"number":         11,
+				"title":          "conflict",
+				"draft":          false,
+				"mergeable":      true,
+				"mergeable_state": "clean",
+				"base": map[string]any{
+					"ref": "main",
+					"repo": map[string]any{
+						"full_name": "acme/api",
+					},
+				},
+				"head": map[string]any{
+					"ref": "feature/conflict",
+					"sha": "abc11",
+				},
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/acme/api/pulls/11/merge":
+			return jsonResponse(t, map[string]any{"merged": true})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/issues/11/comments":
+			body, _ := io.ReadAll(r.Body)
+			var payload struct{ Body string `json:"body"` }
+			_ = json.Unmarshal(body, &payload)
+			commentBodies = append(commentBodies, payload.Body)
+			return jsonResponse(t, map[string]any{"id": 11, "body": payload.Body})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+			return nil, nil
+		}
+	})
+
+	service := &Service{
+		Storage:             store,
+		GitHub:              githubClientWithHTTPClient("https://api.github.test", "test-token", "<!-- marker -->", httpClient),
+		ConflictResolver:    fakeConflictResolver{outcome: conflict.Outcome{Mode: conflict.ModeAutoResolve, MergeClean: true, AutoResolved: true}},
+		ReviewCommentMarker: "<!-- marker -->",
+	}
+
+	got, err := service.RecheckConflict("acme/api", 11, "manual_recheck_cli", nil)
+	if err != nil {
+		t.Fatalf("recheck conflict: %v", err)
+	}
+	if got.ActionStatus != "merged" {
+		t.Fatalf("expected merged status, got %s", got.ActionStatus)
+	}
+	if len(commentBodies) != 1 || !strings.Contains(commentBodies[0], "Accepted. Thank you for your contribution!") {
+		t.Fatalf("expected final accepted comment, got %v", commentBodies)
+	}
+	if _, found, err := store.FindConflictRetry("acme/api", 11); err != nil || found {
+		t.Fatalf("expected retry cache to be cleared, found=%v err=%v", found, err)
 	}
 }
 
