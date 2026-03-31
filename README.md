@@ -129,6 +129,34 @@ This command uses `GITHUB_WEBHOOK_URL` and `GITHUB_WEBHOOK_SECRET` from the envi
 
 这个命令会读取环境中的 `GITHUB_WEBHOOK_URL` 与 `GITHUB_WEBHOOK_SECRET`，并确保目标仓库已配置 `pull_request` 事件 webhook。
 
+### Backward compatibility | 向后兼容
+
+The preferred command names are now:
+
+- `review`
+- `check`
+- `add`
+- `doctor`
+
+Older aliases are still accepted for backward compatibility:
+
+- `review-pr` -> `review`
+- `intervene-pr` -> `check`
+- `register-webhook` -> `add`
+
+当前推荐使用的新命令为：
+
+- `review`
+- `check`
+- `add`
+- `doctor`
+
+为了兼容旧用法，以下别名仍然可用：
+
+- `review-pr` -> `review`
+- `intervene-pr` -> `check`
+- `register-webhook` -> `add`
+
 ### Inspect runtime state | 查看运行状态
 
 ```bash

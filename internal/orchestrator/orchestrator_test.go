@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"pr-agent-go/internal/github"
 	"pr-agent-go/internal/review"
@@ -293,6 +294,51 @@ func TestInterveneMergePublishesFinalComment(t *testing.T) {
 	}
 	if !strings.Contains(commentBodies[0], "Accepted. Thank you for your contribution!") {
 		t.Fatalf("expected final accepted comment, got %q", commentBodies[0])
+	}
+}
+
+func TestMergeWithRepositoryRulesRetriesAfterApprove(t *testing.T) {
+	t.Helper()
+
+	previousDelay := mergeRetryDelayBase
+	mergeRetryDelayBase = time.Millisecond
+	defer func() { mergeRetryDelayBase = previousDelay }()
+
+	mergeAttempts := 0
+	approveCalls := 0
+	httpClient := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/acme/api/pulls/9/merge":
+			mergeAttempts++
+			if mergeAttempts < 3 {
+				return &http.Response{
+					StatusCode: http.StatusMethodNotAllowed,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(strings.NewReader(`{"message":"Repository rule violations found\n\nAt least 1 approving review is required by reviewers with write access.\n\n","status":"405"}`)),
+				}, nil
+			}
+			return jsonResponse(t, map[string]any{"merged": true})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/pulls/9/reviews":
+			approveCalls++
+			return jsonResponse(t, map[string]any{"id": 501})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+			return nil, nil
+		}
+	})
+
+	service := &Service{
+		GitHub: githubClientWithHTTPClient("https://api.github.test", "test-token", "<!-- marker -->", httpClient),
+	}
+
+	if err := service.mergeWithRepositoryRules("acme/api", 9, "docs: refresh"); err != nil {
+		t.Fatalf("mergeWithRepositoryRules returned error: %v", err)
+	}
+	if approveCalls != 1 {
+		t.Fatalf("expected 1 approve call, got %d", approveCalls)
+	}
+	if mergeAttempts != 3 {
+		t.Fatalf("expected 3 merge attempts, got %d", mergeAttempts)
 	}
 }
 

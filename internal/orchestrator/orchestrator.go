@@ -20,6 +20,8 @@ const (
 	trustNeedsUserIntervention = "needs_user_intervention"
 )
 
+var mergeRetryDelayBase = 750 * time.Millisecond
+
 type Service struct {
 	Storage             *storage.FileStorage
 	GitHub              *github.Client
@@ -959,7 +961,18 @@ func (s *Service) mergeWithRepositoryRules(repoFullName string, prNumber int, pu
 			if approveErr := s.GitHub.ApprovePullReview(repoFullName, prNumber, "Automated approval for a trusted PR that passed PR Agent review."); approveErr != nil {
 				return fmt.Errorf("%w; approve attempt failed: %v", err, approveErr)
 			}
-			return s.GitHub.MergePull(repoFullName, prNumber, commitTitle)
+			var retryErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				time.Sleep(time.Duration(attempt+1) * mergeRetryDelayBase)
+				retryErr = s.GitHub.MergePull(repoFullName, prNumber, commitTitle)
+				if retryErr == nil {
+					return nil
+				}
+				if !isApprovalRequiredError(retryErr) {
+					return retryErr
+				}
+			}
+			return retryErr
 		}
 		return err
 	}
