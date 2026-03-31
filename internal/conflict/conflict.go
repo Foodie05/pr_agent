@@ -56,11 +56,13 @@ type FileConflict struct {
 }
 
 type conflictBlock struct {
-	StartMarker int
-	EndMarker   int
-	BlockText   string
-	Before      string
-	After       string
+	StartMarker  int
+	EndMarker    int
+	BlockText    string
+	Before       string
+	After        string
+	CurrentPart  string
+	IncomingPart string
 }
 
 type GitResolver struct {
@@ -361,9 +363,9 @@ func (r *GitResolver) resolveConflictFileByBlocks(pull github.Pull, reviewResult
 				OperatorGoal:    reviewResult.OperatorGoal,
 				ReviewSummary:   reviewResult.Summary,
 				OverallRisk:     reviewResult.OverallRisk,
-				BaseContent:     block.Before,
-				CurrentContent:  block.Before,
-				IncomingContent: block.After,
+				BaseContent:     "Before context:\n" + block.Before + "\nAfter context:\n" + block.After,
+				CurrentContent:  block.CurrentPart,
+				IncomingContent: block.IncomingPart,
 				ConflictMarkers: block.BlockText,
 			})
 			if err != nil {
@@ -395,6 +397,14 @@ func (r *GitResolver) resolveConflictFileByBlocks(pull github.Pull, reviewResult
 	}
 
 	if remaining := countConflictMarkers(resolved); remaining > 0 {
+		if mode == ModeForceResolve {
+			log.Printf("conflict file fallback repo=%s pr=%d path=%s remaining_blocks=%d strategy=prefer_current", pull.Base.Repo.FullName, pull.Number, file.Path, remaining)
+			resolved = resolveRemainingBlocksPreferCurrent(resolved)
+		}
+		remaining = countConflictMarkers(resolved)
+		if remaining == 0 {
+			return resolved, strings.Join(summaries, " | "), minConfidence, nil
+		}
 		log.Printf("conflict file still has unresolved markers repo=%s pr=%d path=%s remaining_blocks=%d", pull.Base.Repo.FullName, pull.Number, file.Path, remaining)
 		return "", "", 0, fmt.Errorf("resolved file still contains conflict markers for %s (%d remaining blocks)", file.Path, remaining)
 	}
@@ -448,17 +458,64 @@ func extractConflictBlocks(content string) []conflictBlock {
 		if afterEnd > len(lines) {
 			afterEnd = len(lines)
 		}
+		currentPart, incomingPart := splitConflictParts(lines[startLine:endLine])
 		blocks = append(blocks, conflictBlock{
-			StartMarker: startOffset,
-			EndMarker:   endOffset,
-			BlockText:   strings.Join(lines[startLine:endLine], ""),
-			Before:      strings.Join(lines[beforeStart:startLine], ""),
-			After:       strings.Join(lines[endLine:afterEnd], ""),
+			StartMarker:  startOffset,
+			EndMarker:    endOffset,
+			BlockText:    strings.Join(lines[startLine:endLine], ""),
+			Before:       strings.Join(lines[beforeStart:startLine], ""),
+			After:        strings.Join(lines[endLine:afterEnd], ""),
+			CurrentPart:  currentPart,
+			IncomingPart: incomingPart,
 		})
 		i = endLine - 1
 		pos = endOffset
 	}
 	return blocks
+}
+
+func splitConflictParts(lines []string) (string, string) {
+	current := []string{}
+	incoming := []string{}
+	mode := ""
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "<<<<<<<"):
+			mode = "current"
+		case strings.HasPrefix(line, "======="):
+			mode = "incoming"
+		case strings.HasPrefix(line, ">>>>>>>"):
+			mode = ""
+		default:
+			if mode == "current" {
+				current = append(current, line)
+			} else if mode == "incoming" {
+				incoming = append(incoming, line)
+			}
+		}
+	}
+	return strings.Join(current, ""), strings.Join(incoming, "")
+}
+
+func resolveRemainingBlocksPreferCurrent(content string) string {
+	lines := strings.SplitAfter(content, "\n")
+	var builder strings.Builder
+	mode := ""
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "<<<<<<<"):
+			mode = "current"
+		case strings.HasPrefix(line, "======="):
+			mode = "incoming"
+		case strings.HasPrefix(line, ">>>>>>>"):
+			mode = ""
+		default:
+			if mode == "" || mode == "current" {
+				builder.WriteString(line)
+			}
+		}
+	}
+	return builder.String()
 }
 
 func (r *GitResolver) collectConflicts(ctx context.Context, repoDir string) ([]FileConflict, error) {
