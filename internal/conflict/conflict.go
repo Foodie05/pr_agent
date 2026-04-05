@@ -235,6 +235,21 @@ func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode
 				outcome.ResolvedFiles = append(outcome.ResolvedFiles, cachedFile)
 				continue
 			}
+			if isIgnorableConflictFile(file.Path) {
+				if err := r.resolveIgnorableConflictFile(repoDir, file.Path); err != nil {
+					return Outcome{}, err
+				}
+				log.Printf("conflict file ignored repo=%s pr=%d path=%s strategy=remove_from_repo", pull.Base.Repo.FullName, pull.Number, file.Path)
+				summary := "ignored system-generated file conflict by removing tracked artifact"
+				resolutionSummaries = append(resolutionSummaries, fmt.Sprintf("%s: %s", file.Path, summary))
+				outcome.ResolvedFiles = append(outcome.ResolvedFiles, ResolvedFile{
+					Path:       file.Path,
+					Content:    "",
+					Summary:    summary,
+					Confidence: 1.0,
+				})
+				continue
+			}
 			log.Printf("conflict file start repo=%s pr=%d path=%s mode=%s", pull.Base.Repo.FullName, pull.Number, file.Path, mode)
 			if !isResolvableFile(file, mode) {
 				log.Printf("conflict file blocked repo=%s pr=%d path=%s reason=unresolvable_file", pull.Base.Repo.FullName, pull.Number, file.Path)
@@ -639,6 +654,30 @@ func isResolvableFile(file FileConflict, mode string) bool {
 		return false
 	}
 	return true
+}
+
+func isIgnorableConflictFile(path string) bool {
+	lower := strings.ToLower(strings.TrimSpace(path))
+	switch {
+	case strings.HasSuffix(lower, "/.ds_store"),
+		lower == ".ds_store",
+		strings.HasSuffix(lower, "/thumbs.db"),
+		lower == "thumbs.db",
+		strings.HasSuffix(lower, "/desktop.ini"),
+		lower == "desktop.ini":
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *GitResolver) resolveIgnorableConflictFile(repoDir, path string) error {
+	fullPath := filepath.Join(repoDir, path)
+	_ = os.Remove(fullPath)
+	if _, err := r.runStep(repoDir, "git", "rm", "-f", "--ignore-unmatch", path); err != nil {
+		return err
+	}
+	return nil
 }
 
 func truncate(value string, max int) string {
