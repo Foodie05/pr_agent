@@ -646,10 +646,10 @@ func isResolvableFile(file FileConflict, mode string) bool {
 	if strings.Contains(file.Path, ".lock") || strings.Contains(file.Path, ".png") || strings.Contains(file.Path, ".jpg") || strings.Contains(file.Path, ".jpeg") || strings.Contains(file.Path, ".gif") || strings.Contains(file.Path, ".pdf") {
 		return false
 	}
-	limit := 40000
 	if mode == ModeForceResolve {
-		limit = 120000
+		return true
 	}
+	limit := 40000
 	if len(file.ConflictMarkers) > limit || len(file.BaseContent) > limit || len(file.CurrentContent) > limit || len(file.IncomingContent) > limit {
 		return false
 	}
