@@ -270,7 +270,7 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 		return Result{StageDurationsMS: recorder.Durations(), TotalDurationMS: recorder.TotalMS()}, err
 	}
 
-	if decision.Action == "merge" && isExplicitAcceptanceNote(userNote) {
+	if decision.Action == "merge" && decision.AuthoritativeApproval {
 		overallRisk = "low"
 		confidence = 0.95
 		confidenceSet = true
@@ -327,8 +327,7 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 				Summary:      reviewSummary,
 				OverallRisk:  overallRisk,
 				OperatorGoal: buildOperatorGoal(userNote, decision.Summary),
-			}, true, isExplicitAcceptanceNote(userNote), nil)
-			if resolveErr != nil {
+}, true, decision.AuthoritativeApproval, nil)			if resolveErr != nil {
 				err = resolveErr
 				break
 			}
@@ -871,58 +870,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func isExplicitAcceptanceNote(note string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(note))
-	if normalized == "" {
-		return false
-	}
-
-	negativeMarkers := []string{
-		"do not merge",
-		"don't merge",
-		"not ready to merge",
-		"暂不合并",
-		"不要合并",
-		"先不要合并",
-		"不接受",
-		"reject",
-	}
-	for _, marker := range negativeMarkers {
-		if strings.Contains(normalized, marker) {
-			return false
-		}
-	}
-
-	positiveMarkers := []string{
-		"accept directly",
-		"accept this pr",
-		"accept the pr",
-		"approved for merge",
-		"force merge",
-		"merge directly",
-		"merge it directly",
-		"merge now",
-		"just merge it",
-		"直接合并",
-		"强行合并",
-		"强制合并",
-		"接受这个pr",
-		"接受该pr",
-		"接受这个pull request",
-		"接受这个合并请求",
-		"直接接受",
-		"handle all conflicts automatically",
-		"完全自行处理",
-	}
-	for _, marker := range positiveMarkers {
-		if strings.Contains(normalized, marker) {
-			return true
-		}
-	}
-
-	return false
 }
 
 func reviewResultFromRun(run storage.ReviewRun) review.Result {

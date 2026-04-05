@@ -77,9 +77,10 @@ type InterventionContext struct {
 }
 
 type InterventionDecision struct {
-	Action  string `json:"action"`
-	Comment string `json:"comment"`
-	Summary string `json:"summary"`
+	Action                string `json:"action"`
+	Comment               string `json:"comment"`
+	Summary               string `json:"summary"`
+	AuthoritativeApproval bool   `json:"authoritative_approval"`
 }
 
 type ConflictContext struct {
@@ -557,11 +558,12 @@ func (a *Agent) ResolveIntervention(context InterventionContext) (InterventionDe
 
 	systemPrompt := `You are a pull request operations assistant.
 Read the current PR state, the latest automated review summary, and the user's note.
-Return valid JSON with keys: action, comment, summary.
+Return valid JSON with keys: action, comment, summary, authoritative_approval.
 Allowed action values are: merge, update_branch, comment_only, re_review.
 Choose merge only when the user clearly approves merging.
 If the user explicitly says to accept, directly merge, or force merge the PR, treat that note as an authoritative approval signal.
-For those explicit approval cases, choose merge unless the note clearly asks for a different action. Downstream automation will treat the effective risk as low and the confidence as high.
+For those explicit approval cases, choose merge unless the note clearly asks for a different action, and set authoritative_approval to true.
+Set authoritative_approval to false for all other cases.
 Choose update_branch only when the user asks to refresh/rebase/sync the branch or when the PR is trusted and merely behind.
 Choose comment_only when human action is still needed or the note is informational.
 Choose re_review when the user asks to rerun or refresh the automated review.
@@ -613,9 +615,10 @@ The comment must be concise and suitable for posting on GitHub.`
 		return InterventionDecision{}, err
 	}
 	return normalizeInterventionDecision(InterventionDecision{
-		Action:  stringValue(payload["action"]),
-		Comment: stringValue(payload["comment"]),
-		Summary: stringValue(payload["summary"]),
+		Action:                stringValue(payload["action"]),
+		Comment:               stringValue(payload["comment"]),
+		Summary:               stringValue(payload["summary"]),
+		AuthoritativeApproval: boolValue(payload["authoritative_approval"]),
 	}), nil
 }
 
@@ -877,9 +880,10 @@ func heuristicIntervention(context InterventionContext) InterventionDecision {
 	note := strings.ToLower(strings.TrimSpace(context.UserNote))
 
 	decision := InterventionDecision{
-		Action:  "comment_only",
-		Summary: "保留为人工介入处理。",
-		Comment: "已收到人工介入意见，当前保留给人工继续处理。",
+		Action:                "comment_only",
+		Summary:               "保留为人工介入处理。",
+		Comment:               "已收到人工介入意见，当前保留给人工继续处理。",
+		AuthoritativeApproval: false,
 	}
 
 	switch {
@@ -895,6 +899,7 @@ func heuristicIntervention(context InterventionContext) InterventionDecision {
 		decision.Action = "merge"
 		decision.Summary = "将尝试按人工意见直接合并。"
 		decision.Comment = "已收到人工意见，系统将尝试直接合并该 PR。"
+		decision.AuthoritativeApproval = true
 	}
 
 	return normalizeInterventionDecision(decision)
@@ -1078,6 +1083,9 @@ func normalizeInterventionDecision(decision InterventionDecision) InterventionDe
 	}
 	if decision.Comment == "" {
 		decision.Comment = decision.Summary
+	}
+	if decision.Action != "merge" {
+		decision.AuthoritativeApproval = false
 	}
 
 	return decision
