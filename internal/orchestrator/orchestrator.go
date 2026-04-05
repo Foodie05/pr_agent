@@ -327,8 +327,7 @@ func (s *Service) IntervenePull(repoFullName string, prNumber int, userNote stri
 				Summary:      reviewSummary,
 				OverallRisk:  overallRisk,
 				OperatorGoal: buildOperatorGoal(userNote, decision.Summary),
-			}, true, decision.AuthoritativeApproval, nil)
-			if resolveErr != nil {
+}, true, decision.AuthoritativeApproval, nil)			if resolveErr != nil {
 				err = resolveErr
 				break
 			}

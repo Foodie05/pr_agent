@@ -235,7 +235,7 @@ func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode
 				outcome.ResolvedFiles = append(outcome.ResolvedFiles, cachedFile)
 				continue
 			}
-			if isIgnorableConflictFile(file.Path) {
+if isIgnorableConflictFile(file.Path) {
 				if err := r.resolveIgnorableConflictFile(repoDir, file.Path); err != nil {
 					return Outcome{}, err
 				}
@@ -249,8 +249,7 @@ func (r *GitResolver) Resolve(pull github.Pull, reviewResult review.Result, mode
 					Confidence: 1.0,
 				})
 				continue
-			}
-			log.Printf("conflict file start repo=%s pr=%d path=%s mode=%s", pull.Base.Repo.FullName, pull.Number, file.Path, mode)
+			}			log.Printf("conflict file start repo=%s pr=%d path=%s mode=%s", pull.Base.Repo.FullName, pull.Number, file.Path, mode)
 			if !isResolvableFile(file, mode) {
 				log.Printf("conflict file blocked repo=%s pr=%d path=%s reason=unresolvable_file", pull.Base.Repo.FullName, pull.Number, file.Path)
 				if mode == ModeForceResolve {
